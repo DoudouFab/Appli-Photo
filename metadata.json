@@ -1,0 +1,6 @@
+{
+  "name": "ChantierShot",
+  "description": "Appareil photo de chantier connecté à Microsoft OneDrive : sélectionnez votre dossier ou sous-dossier et enchaînez vos photos directement dans le cloud.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
