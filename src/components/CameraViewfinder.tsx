@@ -51,7 +51,8 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const nativeCameraInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [cameraState, setCameraState] = useState<'initializing' | 'ready' | 'unavailable'>(
@@ -61,6 +62,10 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   const [showGrid, setShowGrid] = useState(true);
   const [flashActive, setFlashActive] = useState(false);
   const [capturing, setCapturing] = useState(false);
+  const [importingProgress, setImportingProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
   const [sessionCount, setSessionCount] = useState(0);
   const [lastThumbUrl, setLastThumbUrl] = useState<string | null>(null);
   const [zoomRange, setZoomRange] = useState<{ min: number; max: number; step: number } | null>(
@@ -242,33 +247,40 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   const handleNativeFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!activeTarget || !e.target.files || e.target.files.length === 0) return;
     const files = Array.from(e.target.files);
-    let seq = sessionCount;
+    let seq = Math.max(sessionCount, recentSessionPhotos.length);
     const pathText = activeTarget.pathSegments
       .filter((s) => s.id !== 'root')
       .map((s) => s.name)
       .join(' / ');
     const stampLabel = settings.burnStamp ? pathText || activeTarget.name : undefined;
 
-    for (const file of files) {
-      seq += 1;
-      const filename = buildPhotoFilename(settings.prefix, seq);
-      if (file.type.startsWith('image/')) {
-        try {
-          const processed = await normalizeBlobToMax15MP(file, {
-            stampFolderLabel: stampLabel,
-            quality: settings.jpegQuality,
-          });
-          await onPhotoCaptured(processed, filename);
-          continue;
-        } catch {
-          // Fallback to original file if browser cannot decode format
+    setImportingProgress({ current: 0, total: files.length });
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        seq += 1;
+        const filename = buildPhotoFilename(settings.prefix, seq);
+        if (file.type.startsWith('image/')) {
+          try {
+            const processed = await normalizeBlobToMax15MP(file, {
+              stampFolderLabel: stampLabel,
+              quality: settings.jpegQuality,
+            });
+            await onPhotoCaptured(processed, filename);
+            setImportingProgress({ current: i + 1, total: files.length });
+            continue;
+          } catch {
+            // Fallback to original file if browser cannot decode format
+          }
         }
+        await onPhotoCaptured(file, filename);
+        setImportingProgress({ current: i + 1, total: files.length });
       }
-      await onPhotoCaptured(file, filename);
+      setSessionCount(seq);
+    } finally {
+      setImportingProgress(null);
+      e.target.value = '';
     }
-
-    setSessionCount(seq);
-    e.target.value = '';
   };
 
   if (!activeTarget) {
@@ -420,11 +432,19 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 <div className="flex flex-wrap items-center justify-center gap-3">
                   <button
                     type="button"
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => nativeCameraInputRef.current?.click()}
                     className="min-h-[48px] px-5 rounded-xl bg-amber-500 text-slate-950 text-sm font-semibold hover:bg-amber-400 inline-flex items-center gap-2 cursor-pointer"
                   >
                     <Camera className="w-4 h-4" />
                     <span>Appareil photo du téléphone</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => galleryInputRef.current?.click()}
+                    className="min-h-[48px] px-5 rounded-xl bg-white text-slate-950 text-sm font-semibold hover:bg-slate-100 inline-flex items-center gap-2 cursor-pointer"
+                  >
+                    <ImagePlus className="w-4 h-4 text-amber-600" />
+                    <span>Galerie téléphone</span>
                   </button>
                   <button
                     type="button"
@@ -434,6 +454,16 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                     <RefreshCw className="w-4 h-4" />
                     <span>Réessayer</span>
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* Import Progress Overlay */}
+            {importingProgress && (
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-slate-950/80 backdrop-blur-sm text-white p-6">
+                <Loader2 className="w-7 h-7 animate-spin text-amber-400" />
+                <div className="text-sm font-semibold tabular-nums">
+                  Importation galerie {importingProgress.current} / {importingProgress.total}...
                 </div>
               </div>
             )}
@@ -464,33 +494,42 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 onClick={
                   cameraState === 'ready'
                     ? handleCapture
-                    : () => fileInputRef.current?.click()
+                    : () => nativeCameraInputRef.current?.click()
                 }
-                disabled={capturing}
+                disabled={capturing || Boolean(importingProgress)}
                 aria-label="Prendre une photo"
                 className="w-[72px] h-[72px] rounded-full border-4 border-white bg-amber-500 hover:bg-amber-400 active:scale-95 transition-transform flex items-center justify-center shadow-lg cursor-pointer disabled:opacity-60"
               >
                 <span className="w-[56px] h-[56px] rounded-full border-2 border-slate-950/20" />
               </button>
 
-              {/* Right: Native Camera / Multi-import trigger (e.g. ultra-wide 0.5x) */}
+              {/* Right: Phone Gallery Multi-Import Button */}
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="min-h-[48px] px-3 rounded-xl bg-slate-900/80 border border-white/15 text-white text-xs font-medium hover:bg-slate-800 inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
-                title="Utiliser l'appareil natif du téléphone (grand angle, HDR) ou importer"
+                onClick={() => galleryInputRef.current?.click()}
+                disabled={Boolean(importingProgress)}
+                className="min-h-[48px] px-3.5 rounded-xl bg-slate-900/85 border border-white/20 text-white text-xs font-semibold hover:bg-slate-800 inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-60"
+                title="Importer une ou plusieurs photos déjà présentes dans votre galerie téléphone"
               >
                 <ImagePlus className="w-4 h-4 text-amber-400" />
-                <span className="hidden sm:inline">Natif / Import</span>
+                <span>Galerie</span>
               </button>
             </div>
           </div>
 
           <input
-            ref={fileInputRef}
+            ref={nativeCameraInputRef}
             type="file"
             accept="image/*"
             capture="environment"
+            multiple
+            onChange={handleNativeFiles}
+            className="hidden"
+          />
+          <input
+            ref={galleryInputRef}
+            type="file"
+            accept="image/*"
             multiple
             onChange={handleNativeFiles}
             className="hidden"
@@ -606,6 +645,27 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 ))}
               </ul>
             )}
+          </div>
+          {/* Quick Import Shortcuts */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={() => galleryInputRef.current?.click()}
+              disabled={Boolean(importingProgress)}
+              className="min-h-[44px] px-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-800 text-xs font-semibold hover:bg-slate-100 inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <ImagePlus className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>Importer galerie</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => nativeCameraInputRef.current?.click()}
+              disabled={Boolean(importingProgress)}
+              className="min-h-[44px] px-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-800 text-xs font-semibold hover:bg-slate-100 inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Camera className="w-4 h-4 text-slate-700 shrink-0" />
+              <span>Appareil natif</span>
+            </button>
           </div>
         </aside>
       </div>

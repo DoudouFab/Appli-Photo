@@ -80,17 +80,6 @@ export async function deletePhotosByIds(ids: string[]): Promise<void> {
   });
 }
 
-const DEFAULT_SEED_IDS = new Set([
-  'loc_chantier_1',
-  'loc_sub_1_1',
-  'loc_sub_1_2',
-  'loc_subsub_1_2_1',
-  'loc_subsub_1_2_2',
-  'loc_chantier_2',
-  'loc_sub_2_1',
-  'loc_sub_2_2',
-]);
-
 function sanitizeZipSegments(rawPath: string): string[] {
   return rawPath
     .split('/')
@@ -98,46 +87,20 @@ function sanitizeZipSegments(rawPath: string): string[] {
     .filter((s) => s && s !== '.' && s !== '..' && s !== 'Mes chantiers' && s !== 'Chantiers locaux');
 }
 
-export async function getAllUserFolderPaths(photos: QueuedPhoto[] = []): Promise<string[]> {
+export async function getAllUserFolderPaths(): Promise<string[]> {
   const allFolders = await getAllLocalFolders();
   const byId = new Map(allFolders.map((f) => [f.id, f]));
-  const photoFolderIds = new Set(photos.map((p) => p.folderId));
-
-  // Check if any default folder has user-created descendants or photos
-  const activeDefaultRoots = new Set<string>();
-  for (const f of allFolders) {
-    const isCustomOrHasPhoto = !DEFAULT_SEED_IDS.has(f.id) || photoFolderIds.has(f.id);
-    if (!isCustomOrHasPhoto) continue;
-    let curr: LocalFolderRecord | undefined = f;
-    const guard = new Set<string>();
-    while (curr && curr.parentId !== 'root' && !guard.has(curr.id)) {
-      guard.add(curr.id);
-      curr = byId.get(curr.parentId);
-    }
-    if (curr && DEFAULT_SEED_IDS.has(curr.id)) {
-      activeDefaultRoots.add(curr.id);
-    }
-  }
 
   const paths: string[] = [];
   for (const f of allFolders) {
     const segments: string[] = [];
     let curr: LocalFolderRecord | undefined = f;
     const guard = new Set<string>();
-    let rootSeedId: string | null = null;
     while (curr && !guard.has(curr.id)) {
       guard.add(curr.id);
       segments.unshift(curr.name);
-      if (curr.parentId === 'root') {
-        if (DEFAULT_SEED_IDS.has(curr.id)) rootSeedId = curr.id;
-        break;
-      }
+      if (curr.parentId === 'root') break;
       curr = byId.get(curr.parentId);
-    }
-
-    // Skip untouched demo sample folders unless user took photos or added subfolders inside them
-    if (rootSeedId && !activeDefaultRoots.has(rootSeedId)) {
-      continue;
     }
 
     const clean = sanitizeZipSegments(segments.join('/'));
@@ -172,40 +135,7 @@ export async function buildPhotosZipBlob(
 
 // --- Local Offline Folders in IndexedDB ---
 
-export async function seedDefaultLocalFoldersIfEmpty(): Promise<void> {
-  const db = await openDB();
-  const existing = await new Promise<LocalFolderRecord[]>((resolve, reject) => {
-    const tx = db.transaction(FOLDERS_STORE, 'readonly');
-    const req = tx.objectStore(FOLDERS_STORE).getAll();
-    req.onsuccess = () => resolve((req.result as LocalFolderRecord[]) || []);
-    req.onerror = () => reject(req.error);
-  });
-
-  if (existing.length > 0) return;
-
-  const now = Date.now();
-  const defaults: LocalFolderRecord[] = [
-    { id: 'loc_chantier_1', parentId: 'root', name: 'Chantier Villa Belvédère', createdAt: now },
-    { id: 'loc_sub_1_1', parentId: 'loc_chantier_1', name: '01 - Gros Oeuvre', createdAt: now + 1 },
-    { id: 'loc_sub_1_2', parentId: 'loc_chantier_1', name: '02 - Électricité', createdAt: now + 2 },
-    { id: 'loc_subsub_1_2_1', parentId: 'loc_sub_1_2', name: 'Tableau RDC', createdAt: now + 3 },
-    { id: 'loc_subsub_1_2_2', parentId: 'loc_sub_1_2', name: 'Gaines Étage', createdAt: now + 4 },
-    { id: 'loc_chantier_2', parentId: 'root', name: 'Chantier Résidence Parc', createdAt: now + 5 },
-    { id: 'loc_sub_2_1', parentId: 'loc_chantier_2', name: 'Plomberie', createdAt: now + 6 },
-    { id: 'loc_sub_2_2', parentId: 'loc_chantier_2', name: 'Réserves & Finitions', createdAt: now + 7 },
-  ];
-
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(FOLDERS_STORE, 'readwrite');
-    const store = tx.objectStore(FOLDERS_STORE);
-    for (const f of defaults) store.put(f);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
 export async function getLocalFoldersByParent(parentId: string): Promise<LocalFolderRecord[]> {
-  await seedDefaultLocalFoldersIfEmpty();
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(FOLDERS_STORE, 'readonly');
@@ -221,7 +151,6 @@ export async function getLocalFoldersByParent(parentId: string): Promise<LocalFo
 }
 
 export async function getAllLocalFolders(): Promise<LocalFolderRecord[]> {
-  await seedDefaultLocalFoldersIfEmpty();
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(FOLDERS_STORE, 'readonly');
@@ -248,19 +177,24 @@ export async function createLocalFolder(parentId: string, name: string): Promise
   return record;
 }
 
-export async function deleteLocalFolderRecursive(folderId: string): Promise<void> {
+export async function getDescendantFolderIds(folderId: string): Promise<Set<string>> {
   const all = await getAllLocalFolders();
-  const toDelete = new Set<string>([folderId]);
+  const result = new Set<string>([folderId]);
   let added = true;
   while (added) {
     added = false;
     for (const f of all) {
-      if (toDelete.has(f.parentId) && !toDelete.has(f.id)) {
-        toDelete.add(f.id);
+      if (result.has(f.parentId) && !result.has(f.id)) {
+        result.add(f.id);
         added = true;
       }
     }
   }
+  return result;
+}
+
+export async function deleteLocalFolderRecursive(folderId: string): Promise<Set<string>> {
+  const toDelete = await getDescendantFolderIds(folderId);
   const db = await openDB();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(FOLDERS_STORE, 'readwrite');
@@ -268,6 +202,17 @@ export async function deleteLocalFolderRecursive(folderId: string): Promise<void
     for (const id of toDelete) {
       store.delete(id);
     }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  return toDelete;
+}
+
+export async function deleteAllLocalFolders(): Promise<void> {
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(FOLDERS_STORE, 'readwrite');
+    tx.objectStore(FOLDERS_STORE).clear();
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -397,6 +342,29 @@ export function saveActiveTarget(target: TargetFolder | null): void {
   const recents = loadRecentTargets().filter((item) => item.id !== target.id);
   recents.unshift(target);
   localStorage.setItem(RECENT_TARGETS_KEY, JSON.stringify(recents.slice(0, 5)));
+}
+
+export function removeDeletedFoldersFromTargets(deletedIds: Set<string> | 'ALL'): {
+  active: TargetFolder | null;
+  recents: TargetFolder[];
+} {
+  if (deletedIds === 'ALL') {
+    localStorage.removeItem(ACTIVE_TARGET_KEY);
+    localStorage.removeItem(RECENT_TARGETS_KEY);
+    return { active: null, recents: [] };
+  }
+
+  let active = loadActiveTarget();
+  if (active && active.pathSegments.some((s) => deletedIds.has(s.id))) {
+    localStorage.removeItem(ACTIVE_TARGET_KEY);
+    active = null;
+  }
+
+  const recents = loadRecentTargets().filter(
+    (t) => !t.pathSegments.some((s) => deletedIds.has(s.id))
+  );
+  localStorage.setItem(RECENT_TARGETS_KEY, JSON.stringify(recents));
+  return { active, recents };
 }
 
 export function loadRecentTargets(): TargetFolder[] {

@@ -11,12 +11,15 @@ import {
   TargetFolder,
 } from './types';
 import {
+  buildPhotoFilename,
   deletePhotoRecord,
   deletePhotosByIds,
   getAllPhotos,
   loadActiveTarget,
   loadCaptureSettings,
   loadRecentTargets,
+  normalizeBlobToMax15MP,
+  removeDeletedFoldersFromTargets,
   saveActiveTarget,
   saveCaptureSettings,
   savePhotoRecord,
@@ -182,6 +185,82 @@ export function App() {
     setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)));
   };
 
+  const handleImportGalleryFiles = async (target: TargetFolder, files: File[]) => {
+    const pathLabel = target.pathSegments
+      .filter((s) => s.id !== 'root')
+      .map((s) => s.name)
+      .join(' / ');
+    const folderPath = pathLabel || target.name;
+    const stampLabel = settings.burnStamp ? folderPath : undefined;
+
+    let seq = photos.filter((p) => p.folderId === target.id).length;
+    const imported: QueuedPhoto[] = [];
+
+    for (const file of files) {
+      seq += 1;
+      const filename = buildPhotoFilename(settings.prefix, seq);
+      let finalBlob: Blob = file;
+      if (file.type.startsWith('image/')) {
+        try {
+          finalBlob = await normalizeBlobToMax15MP(file, {
+            stampFolderLabel: stampLabel,
+            quality: settings.jpegQuality,
+          });
+        } catch {
+          finalBlob = file;
+        }
+      }
+      const record: QueuedPhoto = {
+        id: `ph_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        filename,
+        blob: finalBlob,
+        size: finalBlob.size,
+        capturedAt: Date.now(),
+        folderId: target.id,
+        folderPath,
+      };
+      await savePhotoRecord(record);
+      imported.push(record);
+    }
+
+    if (imported.length > 0) {
+      setPhotos((prev) => [...imported.reverse(), ...prev]);
+      showToast(`${imported.length} photo(s) importée(s) dans « ${target.name} ».`);
+    }
+  };
+
+  const handleFoldersDeleted = async (
+    deletedFolderIds: Set<string> | 'ALL',
+    alsoDeletePhotos: boolean
+  ) => {
+    const { active, recents } = removeDeletedFoldersFromTargets(deletedFolderIds);
+    setActiveTarget(active);
+    setRecentTargets(recents);
+
+    if (alsoDeletePhotos) {
+      if (deletedFolderIds === 'ALL') {
+        const allIds = photos.map((p) => p.id);
+        if (allIds.length > 0) {
+          await deletePhotosByIds(allIds);
+          setPhotos([]);
+        }
+        showToast('Tous les dossiers et photos ont été supprimés.');
+      } else {
+        const toDeleteIds = photos
+          .filter((p) => deletedFolderIds.has(p.folderId))
+          .map((p) => p.id);
+        if (toDeleteIds.length > 0) {
+          await deletePhotosByIds(toDeleteIds);
+          const idSet = new Set(toDeleteIds);
+          setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)));
+        }
+        showToast('Dossier supprimé.');
+      }
+    } else {
+      showToast('Dossier supprimé.');
+    }
+  };
+
   const totalCount = photos.length;
 
   const sessionPhotosForActiveFolder = activeTarget
@@ -290,6 +369,8 @@ export function App() {
               recentTargets={recentTargets}
               photos={photos}
               onSelectTarget={handleSelectTarget}
+              onImportGalleryFiles={handleImportGalleryFiles}
+              onFoldersDeleted={handleFoldersDeleted}
               onOpenTransfer={() => setActiveTab('queue')}
             />
           )}

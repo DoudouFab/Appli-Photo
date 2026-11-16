@@ -236,7 +236,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
         useHttp = false;
       }
 
-      const folderPaths = await getAllUserFolderPaths(photos);
+      const folderPaths = await getAllUserFolderPaths();
       const sentIds: string[] = [];
 
       if (useHttp) {
@@ -322,7 +322,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
     setExportingZip(true);
     setPhoneTransferMsg(null);
     try {
-      const folderPaths = await getAllUserFolderPaths(photos);
+      const folderPaths = await getAllUserFolderPaths();
       const zipBlob = await buildPhotosZipBlob(photos, folderPaths);
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement('a');
