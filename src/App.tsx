@@ -1,21 +1,18 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Camera,
-  Cloud,
   FolderTree,
   ListChecks,
-  LogOut,
   WifiOff,
 } from 'lucide-react';
 import {
-  AuthStatus,
   CaptureSettings,
   QueuedPhoto,
   TargetFolder,
 } from './types';
 import {
-  clearSyncedPhotos,
   deletePhotoRecord,
+  deletePhotosByIds,
   getAllPhotos,
   loadActiveTarget,
   loadCaptureSettings,
@@ -26,7 +23,6 @@ import {
 } from './lib/storage';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { PWAInstallButton } from './components/PWAInstallButton';
-import { OneDriveSetupModal } from './components/OneDriveSetupModal';
 import { FolderExplorer } from './components/FolderExplorer';
 import { CameraViewfinder } from './components/CameraViewfinder';
 import { UploadQueue } from './components/UploadQueue';
@@ -35,16 +31,6 @@ type ActiveTab = 'folders' | 'camera' | 'queue';
 
 export function App() {
   const isOnline = useOnlineStatus();
-
-  const [authStatus, setAuthStatus] = useState<AuthStatus>({
-    configured: false,
-    authenticated: false,
-    user: null,
-    redirectUri:
-      typeof window !== 'undefined'
-        ? `${window.location.origin}/auth/callback`
-        : '/auth/callback',
-  });
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('folders');
   const [activeTarget, setActiveTarget] = useState<TargetFolder | null>(() =>
@@ -57,10 +43,20 @@ export function App() {
     loadCaptureSettings()
   );
   const [photos, setPhotos] = useState<QueuedPhoto[]>([]);
-  const [setupModalOpen, setSetupModalOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-  const uploadingIdsRef = useRef<Set<string>>(new Set());
+  const [pendingPcAck, setPendingPcAck] = useState<{
+    code: string;
+    sentIds: string[];
+    autoDelete: boolean;
+    mode: 'http' | 'p2p';
+  } | null>(() => {
+    try {
+      const raw = localStorage.getItem('chantiershot_pending_pc_ack_v1');
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -69,16 +65,22 @@ export function App() {
     }, 3500);
   }, []);
 
-  const refreshAuthStatus = useCallback(async () => {
-    try {
-      const res = await fetch('/api/auth/status');
-      if (!res.ok) return;
-      const data = (await res.json()) as AuthStatus;
-      setAuthStatus(data);
-    } catch {
-      // Offline or server unreachable
-    }
-  }, []);
+  const handleConfirmPcAck = useCallback(
+    async (sentIds: string[], autoDelete: boolean) => {
+      if (autoDelete && sentIds.length > 0) {
+        await deletePhotosByIds(sentIds);
+        const idSet = new Set(sentIds);
+        setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)));
+        showToast(
+          `Transfert PC réussi : ${sentIds.length} photo(s) supprimée(s) automatiquement.`
+        );
+      } else {
+        showToast('Transfert confirmé sur votre PC.');
+      }
+      setPendingPcAck(null);
+    },
+    [showToast]
+  );
 
   const loadStoredPhotos = useCallback(async () => {
     try {
@@ -90,139 +92,50 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    refreshAuthStatus();
     loadStoredPhotos();
-  }, [refreshAuthStatus, loadStoredPhotos]);
+    if (navigator.storage && typeof navigator.storage.persist === 'function') {
+      navigator.storage.persist().catch(() => {});
+    }
+  }, [loadStoredPhotos]);
 
-  // Listen for OAuth popup completion
+  // Background poll for HTTP PC confirmation even if user switches tabs on phone
   useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (
-        !origin.endsWith('.run.app') &&
-        !origin.includes('localhost') &&
-        origin !== window.location.origin
-      ) {
-        return;
-      }
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        refreshAuthStatus();
-        showToast('Compte OneDrive connecté.');
-      } else if (event.data?.type === 'OAUTH_AUTH_ERROR') {
-        showToast('Échec de la connexion Microsoft OneDrive.');
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [refreshAuthStatus, showToast]);
+    if (!pendingPcAck) {
+      localStorage.removeItem('chantiershot_pending_pc_ack_v1');
+      return;
+    }
+    if (pendingPcAck.mode === 'http') {
+      localStorage.setItem('chantiershot_pending_pc_ack_v1', JSON.stringify(pendingPcAck));
+    } else {
+      // P2P sessions rely on live DataChannel ack and are not persisted across full reloads
+      return;
+    }
 
-  const handleConnectOneDrive = async () => {
-    try {
-      const res = await fetch('/api/auth/url');
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { error?: string };
-        if (err.error === 'MICROSOFT_NOT_CONFIGURED') {
-          setSetupModalOpen(true);
+    let active = true;
+    const checkAck = async () => {
+      try {
+        const res = await fetch(`./api/transfer/${pendingPcAck.code}/status`);
+        if (res.status === 404 && active) {
+          setPendingPcAck(null);
           return;
         }
-        showToast('Impossible de démarrer la connexion OneDrive.');
-        return;
-      }
-      const { url } = (await res.json()) as { url: string };
-      const popup = window.open(url, 'onedrive_oauth_popup', 'width=600,height=720');
-      if (!popup) {
-        showToast('Autorisez les fenêtres pop-up pour connecter OneDrive.');
-      }
-    } catch {
-      showToast('Erreur réseau lors de la connexion à OneDrive.');
-    }
-  };
-
-  const handleLogout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
-    setAuthStatus((prev) => ({ ...prev, authenticated: false, user: null }));
-    if (activeTarget?.source === 'onedrive') {
-      setActiveTarget(null);
-      saveActiveTarget(null);
-    }
-    showToast('Déconnecté de OneDrive.');
-  };
-
-  const uploadSinglePhoto = useCallback(
-    async (photo: QueuedPhoto) => {
-      if (uploadingIdsRef.current.has(photo.id)) return;
-      if (!authStatus.authenticated || !isOnline) return;
-
-      uploadingIdsRef.current.add(photo.id);
-      const uploadingState: QueuedPhoto = {
-        ...photo,
-        status: 'uploading',
-        errorMessage: undefined,
-      };
-      setPhotos((prev) => prev.map((p) => (p.id === photo.id ? uploadingState : p)));
-      await savePhotoRecord(uploadingState);
-
-      try {
-        const targetParentId = photo.source === 'onedrive' ? photo.folderId : 'root';
-        const res = await fetch('/api/onedrive/upload', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'X-Parent-Id': encodeURIComponent(targetParentId),
-            'X-File-Name': encodeURIComponent(photo.filename),
-            'X-Content-Type': photo.blob.type || 'image/jpeg',
-          },
-          body: photo.blob,
-        });
-
-        if (!res.ok) {
-          const errData = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(errData.error || `Erreur HTTP ${res.status}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { received?: boolean };
+        if (data.received && active) {
+          await handleConfirmPcAck(pendingPcAck.sentIds, pendingPcAck.autoDelete);
         }
-
-        const data = (await res.json()) as { item?: { webUrl?: string } };
-        const syncedPhoto: QueuedPhoto = {
-          ...photo,
-          status: 'synced',
-          source: 'onedrive',
-          webUrl: data.item?.webUrl,
-          errorMessage: undefined,
-        };
-
-        if (settings.autoPurgeAfterSync) {
-          // Keep entry briefly without bloating long-term disk cache by removing old synced ones later;
-          // save synced state so user sees immediate confirmation in Queue.
-          await savePhotoRecord(syncedPhoto);
-        } else {
-          await savePhotoRecord(syncedPhoto);
-        }
-
-        setPhotos((prev) => prev.map((p) => (p.id === photo.id ? syncedPhoto : p)));
-      } catch (err) {
-        const errorPhoto: QueuedPhoto = {
-          ...photo,
-          status: 'error',
-          errorMessage: err instanceof Error ? err.message : 'Échec du transfert',
-        };
-        await savePhotoRecord(errorPhoto);
-        setPhotos((prev) => prev.map((p) => (p.id === photo.id ? errorPhoto : p)));
-      } finally {
-        uploadingIdsRef.current.delete(photo.id);
+      } catch {
+        // Retry next interval
       }
-    },
-    [authStatus.authenticated, isOnline, settings.autoPurgeAfterSync]
-  );
+    };
 
-  // Auto-sync pending OneDrive photos when coming back online
-  useEffect(() => {
-    if (!isOnline || !authStatus.authenticated) return;
-    const pendingOneDrive = photos.filter(
-      (p) => p.source === 'onedrive' && p.status === 'pending'
-    );
-    pendingOneDrive.forEach((photo) => {
-      uploadSinglePhoto(photo);
-    });
-  }, [isOnline, authStatus.authenticated, photos, uploadSinglePhoto]);
+    checkAck();
+    const timer = setInterval(checkAck, 2000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [pendingPcAck, handleConfirmPcAck]);
 
   const handleSelectTarget = (target: TargetFolder, launchCamera = false) => {
     setActiveTarget(target);
@@ -240,7 +153,10 @@ export function App() {
 
   const handlePhotoCaptured = async (blob: Blob, filename: string) => {
     if (!activeTarget) return;
-    const pathLabel = activeTarget.pathSegments.map((s) => s.name).join(' / ');
+    const pathLabel = activeTarget.pathSegments
+      .filter((s) => s.id !== 'root')
+      .map((s) => s.name)
+      .join(' / ');
     const newPhoto: QueuedPhoto = {
       id: `ph_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       filename,
@@ -248,30 +164,11 @@ export function App() {
       size: blob.size,
       capturedAt: Date.now(),
       folderId: activeTarget.id,
-      folderPath: pathLabel,
-      source: activeTarget.source,
-      status: 'pending',
+      folderPath: pathLabel || activeTarget.name,
     };
 
     await savePhotoRecord(newPhoto);
     setPhotos((prev) => [newPhoto, ...prev]);
-
-    if (activeTarget.source === 'onedrive' && authStatus.authenticated && isOnline) {
-      uploadSinglePhoto(newPhoto);
-    }
-  };
-
-  const handleSyncAll = async () => {
-    if (!authStatus.authenticated || !isOnline) return;
-    const toSync = photos.filter((p) => p.status === 'pending' || p.status === 'error');
-    for (const photo of toSync) {
-      await uploadSinglePhoto(photo);
-    }
-  };
-
-  const handleRetryPhoto = async (id: string) => {
-    const found = photos.find((p) => p.id === id);
-    if (found) await uploadSinglePhoto(found);
   };
 
   const handleDeletePhoto = async (id: string) => {
@@ -279,35 +176,48 @@ export function App() {
     setPhotos((prev) => prev.filter((p) => p.id !== id));
   };
 
-  const handleClearSynced = async () => {
-    await clearSyncedPhotos();
-    setPhotos((prev) => prev.filter((p) => p.status !== 'synced'));
+  const handleDeletePhotosBatch = async (ids: string[]) => {
+    await deletePhotosByIds(ids);
+    const idSet = new Set(ids);
+    setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)));
   };
 
-  const pendingCount = photos.filter(
-    (p) => p.status === 'pending' || p.status === 'uploading' || p.status === 'error'
-  ).length;
+  const totalCount = photos.length;
 
   const sessionPhotosForActiveFolder = activeTarget
-    ? photos.filter(
-        (p) => p.folderId === activeTarget.id && p.source === activeTarget.source
-      )
+    ? photos.filter((p) => p.folderId === activeTarget.id)
     : [];
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
       {/* Top Bar — 3-Zone Contract on Desktop, Compact 52px Header on Mobile */}
       <header className="sticky top-0 z-30 h-[52px] md:h-16 bg-white/90 backdrop-blur-md border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 md:gap-8">
-        {/* Zone 1: Brand Title */}
+        {/* Zone 1: Brand Title with refined architectural camera-folder emblem */}
         <a
-          href="/"
+          href="./"
           onClick={(e) => {
             e.preventDefault();
             setActiveTab('folders');
           }}
-          className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display"
+          className="inline-flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display"
         >
-          ChantierShot
+          <svg
+            viewBox="0 0 32 32"
+            fill="none"
+            className="w-7 h-7 shrink-0"
+            aria-hidden="true"
+          >
+            <rect width="32" height="32" rx="8" fill="#0F172A" />
+            <path
+              d="M6.5 10.5C6.5 9.67157 7.17157 9 8 9H12.8L14.5 10.7H24C24.8284 10.7 25.5 11.3716 25.5 12.2V22C25.5 22.8284 24.8284 23.5 24 23.5H8C7.17157 23.5 6.5 22.8284 6.5 22V10.5Z"
+              fill="#1E293B"
+              stroke="#475569"
+              strokeWidth="1.2"
+            />
+            <circle cx="16" cy="17.2" r="4.3" fill="#0F172A" stroke="#F59E0B" strokeWidth="1.7" />
+            <circle cx="16" cy="17.2" r="1.7" fill="#F59E0B" />
+          </svg>
+          <span>ChantierShot</span>
         </a>
 
         {/* Zone 2: Desktop Navigation Links */}
@@ -343,95 +253,80 @@ export function App() {
                 : 'hover:text-slate-900'
             }`}
           >
-            File d’envoi{pendingCount > 0 ? ` (${pendingCount})` : ''}
+            Transfert{totalCount > 0 ? ` (${totalCount})` : ''}
           </button>
         </nav>
 
-        {/* Zone 3: Primary Action */}
+        {/* Zone 3: Install App Primary Action (visible on mobile & desktop) */}
         <div className="flex items-center gap-2 shrink-0">
-          <div className="hidden sm:block">
-            <PWAInstallButton />
-          </div>
-          {authStatus.authenticated ? (
-            <div className="flex items-center gap-2">
-              <span className="hidden sm:inline text-xs font-medium text-slate-600 max-w-[160px] truncate">
-                {authStatus.user?.displayName || authStatus.user?.mail || 'OneDrive'}
-              </span>
-              <button
-                type="button"
-                onClick={handleLogout}
-                aria-label="Déconnecter OneDrive"
-                className="min-h-[40px] px-3 rounded-lg border border-slate-300 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Déconnexion</span>
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={handleConnectOneDrive}
-              className="min-h-[40px] px-3.5 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Cloud className="w-3.5 h-3.5 text-sky-400" />
-              <span>Connecter OneDrive</span>
-            </button>
-          )}
+          <PWAInstallButton />
+          <button
+            type="button"
+            onClick={() => setActiveTab('camera')}
+            className="hidden md:inline-flex min-h-[40px] px-3.5 py-2 rounded-lg bg-amber-500 text-slate-950 text-xs font-semibold hover:bg-amber-400 transition-colors items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Camera className="w-3.5 h-3.5" />
+            <span>Prendre une photo</span>
+          </button>
         </div>
       </header>
 
-      {/* Real Connectivity Banner (only shown when offline) */}
+      {/* Offline Status Banner */}
       {!isOnline && (
-        <div className="bg-amber-500 text-slate-950 px-4 py-2 text-xs font-semibold flex items-center justify-center gap-2">
-          <WifiOff className="w-4 h-4 shrink-0" />
+        <div className="bg-amber-500 text-slate-950 px-4 py-1.5 text-xs font-semibold flex items-center justify-center gap-2">
+          <WifiOff className="w-3.5 h-3.5 shrink-0" />
           <span>
-            Mode hors-ligne : vos photos sont sécurisées localement et partiront sur OneDrive dès le retour du réseau.
+            Mode hors-ligne actif : dossiers, photos et export ZIP restent 100 % disponibles.
           </span>
         </div>
       )}
 
       {/* Main Workspace */}
-      <main className="flex-1">
-        {activeTab === 'folders' && (
-          <FolderExplorer
-            authStatus={authStatus}
-            activeTarget={activeTarget}
-            recentTargets={recentTargets}
-            photos={photos}
-            onSelectTarget={handleSelectTarget}
-            onConnectOneDrive={handleConnectOneDrive}
-          />
-        )}
+      <main className="flex-1 flex flex-col">
+        <div className="flex-1">
+          {activeTab === 'folders' && (
+            <FolderExplorer
+              activeTarget={activeTarget}
+              recentTargets={recentTargets}
+              photos={photos}
+              onSelectTarget={handleSelectTarget}
+              onOpenTransfer={() => setActiveTab('queue')}
+            />
+          )}
 
-        {activeTab === 'camera' && (
-          <CameraViewfinder
-            activeTarget={activeTarget}
-            settings={settings}
-            recentSessionPhotos={sessionPhotosForActiveFolder}
-            onUpdateSettings={handleUpdateSettings}
-            onPhotoCaptured={handlePhotoCaptured}
-            onChangeFolder={() => setActiveTab('folders')}
-            onOpenQueue={() => setActiveTab('queue')}
-          />
-        )}
+          {activeTab === 'camera' && (
+            <CameraViewfinder
+              activeTarget={activeTarget}
+              settings={settings}
+              recentSessionPhotos={sessionPhotosForActiveFolder}
+              totalStoredPhotos={totalCount}
+              onUpdateSettings={handleUpdateSettings}
+              onPhotoCaptured={handlePhotoCaptured}
+              onChangeFolder={() => setActiveTab('folders')}
+              onOpenTransfer={() => setActiveTab('queue')}
+            />
+          )}
 
-        {activeTab === 'queue' && (
-          <UploadQueue
-            photos={photos}
-            authStatus={authStatus}
-            isOnline={isOnline}
-            settings={settings}
-            onUpdateSettings={handleUpdateSettings}
-            onSyncAll={handleSyncAll}
-            onRetryPhoto={handleRetryPhoto}
-            onDeletePhoto={handleDeletePhoto}
-            onClearSynced={handleClearSynced}
-            onConnectOneDrive={handleConnectOneDrive}
-          />
-        )}
+          {activeTab === 'queue' && (
+            <UploadQueue
+              photos={photos}
+              isOnline={isOnline}
+              pendingPcAck={pendingPcAck}
+              onStartWaitingPcAck={setPendingPcAck}
+              onConfirmPcAck={handleConfirmPcAck}
+              onDeletePhoto={handleDeletePhoto}
+              onDeletePhotosBatch={handleDeletePhotosBatch}
+            />
+          )}
+        </div>
+
+        {/* Quiet Signature Footer */}
+        <footer className="mx-auto w-full max-w-6xl px-4 sm:px-6 pt-2 pb-24 md:pb-6 text-center md:text-right text-xs text-slate-400">
+          ChantierShot · F.Pirquin
+        </footer>
       </main>
 
-      {/* Mobile Bottom Thumb-Zone Tab Bar (64px, fits within 15% combined sticky height cap) */}
+      {/* Mobile Bottom Thumb-Zone Tab Bar (64px, within 15% combined sticky height cap) */}
       <nav
         aria-label="Navigation principale mobile"
         className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 pb-safe"
@@ -474,7 +369,7 @@ export function App() {
               className={`w-5 h-5 ${activeTab === 'queue' ? 'text-amber-600' : ''}`}
             />
             <span className="text-[11px] font-medium tracking-tight tabular-nums">
-              File{pendingCount > 0 ? ` (${pendingCount})` : ''}
+              Transfert{totalCount > 0 ? ` (${totalCount})` : ''}
             </span>
           </button>
         </div>
@@ -486,12 +381,6 @@ export function App() {
           {toastMessage}
         </div>
       )}
-
-      <OneDriveSetupModal
-        open={setupModalOpen}
-        redirectUri={authStatus.redirectUri}
-        onClose={() => setSetupModalOpen(false)}
-      />
     </div>
   );
 }

@@ -1,7 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
-  <rect width="512" height="512" rx="112" fill="#0F172A"/>
-  <path d="M96 152C96 134.327 110.327 120 128 120H202.745C211.232 120 219.371 123.371 225.373 129.373L248 152H384C401.673 152 416 166.327 416 184V360C416 377.673 401.673 392 384 392H128C110.327 392 96 377.673 96 360V152Z" fill="#1E293B" stroke="#334155" stroke-width="8"/>
-  <circle cx="256" cy="272" r="76" fill="#0F172A" stroke="#F59E0B" stroke-width="14"/>
-  <circle cx="256" cy="272" r="36" fill="#F59E0B"/>
-  <circle cx="364" cy="196" r="10" fill="#38BDF8"/>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E293B"/>
+    </linearGradient>
+    <linearGradient id="amberGrad" x1="168" y1="184" x2="344" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FBBF24"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+  <!-- Subtle architectural corner frame -->
+  <path d="M80 144V104C80 90.7452 90.7452 80 104 80H144" stroke="#334155" stroke-width="10" stroke-linecap="round"/>
+  <path d="M432 144V104C432 90.7452 421.255 80 408 80H368" stroke="#334155" stroke-width="10" stroke-linecap="round"/>
+  <path d="M80 368V408C80 421.255 90.7452 432 104 432H144" stroke="#334155" stroke-width="10" stroke-linecap="round"/>
+  <path d="M432 368V408C432 421.255 421.255 432 408 432H368" stroke="#334155" stroke-width="10" stroke-linecap="round"/>
+  <!-- Folder silhouette -->
+  <path d="M104 164C104 146.327 118.327 132 136 132H210.745C219.232 132 227.371 135.371 233.373 141.373L254 162H376C393.673 162 408 176.327 408 194V348C408 365.673 393.673 380 376 380H136C118.327 380 104 365.673 104 348V164Z" fill="#1E293B" stroke="#475569" stroke-width="8"/>
+  <!-- Precision camera aperture -->
+  <circle cx="256" cy="272" r="72" fill="#0F172A" stroke="url(#amberGrad)" stroke-width="16"/>
+  <circle cx="256" cy="272" r="32" fill="url(#amberGrad)"/>
+  <circle cx="242" cy="258" r="8" fill="#FEF3C7" opacity="0.85"/>
+  <!-- Viewfinder indicator -->
+  <rect x="348" y="192" width="28" height="14" rx="7" fill="#F59E0B"/>
 </svg>

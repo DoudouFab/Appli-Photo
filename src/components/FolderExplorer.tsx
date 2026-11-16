@@ -1,54 +1,45 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  ArrowRight,
   Camera,
   ChevronRight,
-  Cloud,
   Folder,
   FolderPlus,
-  HardDrive,
   Home,
-  Image as ImageIcon,
   Loader2,
-  RefreshCw,
+  Trash2,
 } from 'lucide-react';
 import {
-  AuthStatus,
   BreadcrumbSegment,
-  DriveFolderItem,
+  LocalFolderRecord,
   QueuedPhoto,
-  StorageSource,
   TargetFolder,
 } from '../types';
 import {
   createLocalFolder,
-  formatBytes,
+  deleteLocalFolderRecursive,
   getLocalFoldersByParent,
 } from '../lib/storage';
 
 interface FolderExplorerProps {
-  authStatus: AuthStatus;
   activeTarget: TargetFolder | null;
   recentTargets: TargetFolder[];
   photos: QueuedPhoto[];
   onSelectTarget: (target: TargetFolder, launchCamera?: boolean) => void;
-  onConnectOneDrive: () => void;
+  onOpenTransfer: () => void;
 }
 
 export const FolderExplorer: React.FC<FolderExplorerProps> = ({
-  authStatus,
   activeTarget,
   recentTargets,
   photos,
   onSelectTarget,
-  onConnectOneDrive,
+  onOpenTransfer,
 }) => {
-  const [source, setSource] = useState<StorageSource>(
-    authStatus.authenticated ? 'onedrive' : 'local'
-  );
   const [breadcrumbs, setBreadcrumbs] = useState<BreadcrumbSegment[]>([
-    { id: 'root', name: authStatus.authenticated ? 'OneDrive' : 'Chantiers locaux' },
+    { id: 'root', name: 'Mes chantiers' },
   ]);
-  const [items, setItems] = useState<DriveFolderItem[]>([]);
+  const [folders, setFolders] = useState<LocalFolderRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,93 +47,26 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
   const [newFolderName, setNewFolderName] = useState('');
   const [submittingFolder, setSubmittingFolder] = useState(false);
 
-  // Sync default source when authentication completes
-  useEffect(() => {
-    if (authStatus.authenticated && source === 'local' && !activeTarget) {
-      setSource('onedrive');
-      setBreadcrumbs([{ id: 'root', name: 'OneDrive' }]);
-    }
-  }, [authStatus.authenticated, activeTarget, source]);
-
   const currentFolder = breadcrumbs[breadcrumbs.length - 1];
 
-  const loadFolder = useCallback(async (targetSource: StorageSource, folderId: string) => {
+  const loadFolder = useCallback(async (folderId: string) => {
     setLoading(true);
     setError(null);
-
     try {
-      if (targetSource === 'onedrive') {
-        const res = await fetch(`/api/onedrive/children?folderId=${encodeURIComponent(folderId)}`);
-        if (res.status === 401) {
-          setError('Session OneDrive expirée. Reconnectez votre compte.');
-          setItems([]);
-          return;
-        }
-        if (!res.ok) {
-          throw new Error('Impossible de charger ce dossier OneDrive.');
-        }
-        const data = (await res.json()) as {
-          items: Array<{
-            id: string;
-            name: string;
-            folder?: { childCount?: number };
-            file?: { mimeType?: string };
-            size?: number;
-            lastModifiedDateTime?: string;
-            webUrl?: string;
-          }>;
-        };
-
-        const mapped: DriveFolderItem[] = data.items
-          .filter((it) => Boolean(it.folder) || it.file?.mimeType?.startsWith('image/'))
-          .map((it) => ({
-            id: it.id,
-            name: it.name,
-            isFolder: Boolean(it.folder),
-            childCount: it.folder?.childCount,
-            size: it.size,
-            lastModifiedDateTime: it.lastModifiedDateTime,
-            webUrl: it.webUrl,
-          }));
-        setItems(mapped);
-      } else {
-        const subFolders = await getLocalFoldersByParent(folderId);
-        const mapped: DriveFolderItem[] = subFolders.map((f) => ({
-          id: f.id,
-          name: f.name,
-          isFolder: true,
-        }));
-        setItems(mapped);
-      }
+      const subFolders = await getLocalFoldersByParent(folderId);
+      setFolders(subFolders);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur de lecture du dossier.');
+      setError(err instanceof Error ? err.message : 'Erreur de lecture des dossiers.');
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (source === 'onedrive' && !authStatus.authenticated) {
-      setItems([]);
-      return;
-    }
-    loadFolder(source, currentFolder.id);
-  }, [source, currentFolder.id, authStatus.authenticated, loadFolder]);
+    loadFolder(currentFolder.id);
+  }, [currentFolder.id, loadFolder]);
 
-  const switchSource = (nextSource: StorageSource) => {
-    if (nextSource === 'onedrive' && !authStatus.authenticated) {
-      onConnectOneDrive();
-      return;
-    }
-    setSource(nextSource);
-    setBreadcrumbs([
-      { id: 'root', name: nextSource === 'onedrive' ? 'OneDrive' : 'Chantiers locaux' },
-    ]);
-    setCreatingFolder(false);
-  };
-
-  const enterFolder = (folder: DriveFolderItem) => {
-    if (!folder.isFolder) return;
+  const enterFolder = (folder: LocalFolderRecord) => {
     setBreadcrumbs((prev) => [...prev, { id: folder.id, name: folder.name }]);
     setCreatingFolder(false);
   };
@@ -157,20 +81,18 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
       {
         id: currentFolder.id,
         name: currentFolder.name,
-        source,
         pathSegments: breadcrumbs,
       },
       launchCamera
     );
   };
 
-  const handleSelectChild = (folder: DriveFolderItem, launchCamera: boolean) => {
+  const handleSelectChild = (folder: LocalFolderRecord, launchCamera: boolean) => {
     const nextSegments = [...breadcrumbs, { id: folder.id, name: folder.name }];
     onSelectTarget(
       {
         id: folder.id,
         name: folder.name,
-        source,
         pathSegments: nextSegments,
       },
       launchCamera
@@ -185,19 +107,10 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
     setSubmittingFolder(true);
     setError(null);
     try {
-      if (source === 'onedrive') {
-        const res = await fetch('/api/onedrive/folder', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ parentId: currentFolder.id, name: trimmed }),
-        });
-        if (!res.ok) throw new Error('Création du dossier OneDrive impossible.');
-      } else {
-        await createLocalFolder(currentFolder.id, trimmed);
-      }
+      await createLocalFolder(currentFolder.id, trimmed);
       setNewFolderName('');
       setCreatingFolder(false);
-      await loadFolder(source, currentFolder.id);
+      await loadFolder(currentFolder.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erreur lors de la création.');
     } finally {
@@ -205,87 +118,39 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
     }
   };
 
-  const folderItems = items.filter((i) => i.isFolder);
-  const photoItems = items.filter((i) => !i.isFolder);
-  const localPhotosInCurrent = photos.filter(
-    (p) => p.folderId === currentFolder.id && p.source === source
-  );
+  const handleDeleteFolder = async (folderId: string) => {
+    await deleteLocalFolderRecursive(folderId);
+    await loadFolder(currentFolder.id);
+  };
+
+  const photosInCurrent = photos.filter((p) => p.folderId === currentFolder.id);
+
+  const countPhotosInSubtree = (folderId: string, folderName: string) => {
+    return photos.filter(
+      (p) =>
+        p.folderId === folderId ||
+        p.folderPath.split('/').some((seg) => seg.trim() === folderName)
+    ).length;
+  };
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 py-5 pb-32 lg:pb-10">
-      {/* OneDrive Connection Status Banner when not authenticated */}
-      {!authStatus.authenticated && (
-        <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <h2 className="text-base font-semibold text-slate-900">
-              Connectez votre compte Microsoft OneDrive
-            </h2>
-            <p className="text-sm text-slate-600">
-              Vos photos seront envoyées directement dans vos dossiers de chantier OneDrive sans encombrer la galerie du téléphone. En attendant, vous pouvez tester avec les dossiers locaux hors-ligne.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onConnectOneDrive}
-            className="min-h-[44px] px-4 py-2.5 rounded-xl bg-sky-600 text-white text-sm font-semibold hover:bg-sky-700 transition-colors inline-flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Cloud className="w-4 h-4" />
-            <span>Connecter OneDrive</span>
-          </button>
-        </div>
-      )}
-
+    <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 py-4 sm:py-5">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Main Folder Browser Column */}
         <div className="lg:col-span-8 space-y-4">
-          {/* Source Selector & Actions */}
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-200/70">
-              <button
-                type="button"
-                onClick={() => switchSource('onedrive')}
-                className={`min-h-[40px] px-3.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  source === 'onedrive'
-                    ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <Cloud className="w-4 h-4 text-sky-600" />
-                <span>OneDrive</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => switchSource('local')}
-                className={`min-h-[40px] px-3.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  source === 'local'
-                    ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <HardDrive className="w-4 h-4 text-amber-600" />
-                <span>Dossiers locaux</span>
-              </button>
-            </div>
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="text-lg font-semibold text-slate-900">
+              Dossiers de chantier
+            </h1>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setCreatingFolder((v) => !v)}
-                className="min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 bg-white text-slate-800 text-xs font-semibold hover:bg-slate-50 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <FolderPlus className="w-4 h-4 text-amber-600" />
-                <span>Nouveau dossier</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => loadFolder(source, currentFolder.id)}
-                disabled={loading}
-                aria-label="Actualiser"
-                className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer disabled:opacity-50"
-              >
-                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => setCreatingFolder((v) => !v)}
+              className="min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 bg-white text-slate-800 text-xs font-semibold hover:bg-slate-50 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <FolderPlus className="w-4 h-4 text-amber-600" />
+              <span>Nouveau dossier</span>
+            </button>
           </div>
 
           {/* Breadcrumb Trail */}
@@ -325,7 +190,7 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                 type="text"
                 value={newFolderName}
                 onChange={(e) => setNewFolderName(e.target.value)}
-                placeholder="Ex: Lot 03 - Menuiserie ou Étage 2..."
+                placeholder="Ex: Chantier Martin, Lot Électricité, Étage 2..."
                 autoFocus
                 className="flex-1 min-h-[44px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
               />
@@ -351,7 +216,6 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
             </form>
           )}
 
-          {/* Error Notice */}
           {error && (
             <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
               {error}
@@ -361,27 +225,25 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
           {/* Folder List */}
           <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-4">
-              <div className="text-xs font-medium text-slate-500">
-                <span className="tabular-nums">{folderItems.length}</span> dossier
-                {folderItems.length > 1 ? 's' : ''}
-                {photoItems.length + localPhotosInCurrent.length > 0 && (
+              <div className="text-xs font-medium text-slate-500 tabular-nums">
+                {folders.length} dossier{folders.length > 1 ? 's' : ''}
+                {photosInCurrent.length > 0 && (
                   <>
                     <span className="mx-1.5">·</span>
-                    <span className="tabular-nums">
-                      {photoItems.length + localPhotosInCurrent.length}
-                    </span>{' '}
-                    photo{photoItems.length + localPhotosInCurrent.length > 1 ? 's' : ''}
+                    {photosInCurrent.length} photo{photosInCurrent.length > 1 ? 's' : ''} ici
                   </>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={() => handleSelectCurrent(true)}
-                className="min-h-[36px] px-3 rounded-lg bg-amber-500 text-slate-950 text-xs font-semibold hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Camera className="w-3.5 h-3.5" />
-                <span>Photographier dans « {currentFolder.name} »</span>
-              </button>
+              {breadcrumbs.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => handleSelectCurrent(true)}
+                  className="min-h-[36px] px-3 rounded-lg bg-amber-500 text-slate-950 text-xs font-semibold hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>Photographier ici</span>
+                </button>
+              )}
             </div>
 
             {loading ? (
@@ -389,20 +251,29 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                 <Loader2 className="w-4 h-4 animate-spin" />
                 <span>Chargement des dossiers...</span>
               </div>
-            ) : folderItems.length === 0 && photoItems.length === 0 ? (
-              <div className="py-12 px-4 text-center space-y-2">
+            ) : folders.length === 0 ? (
+              <div className="py-12 px-4 text-center space-y-3">
                 <p className="text-sm font-medium text-slate-800">
-                  Ce dossier est vide pour le moment.
+                  Aucun sous-dossier ici pour le moment.
                 </p>
                 <p className="text-xs text-slate-500">
-                  Créez un sous-dossier (ex: Électricité, Plomberie) ou commencez directement à prendre des photos ici.
+                  Créez un sous-dossier (ex: Sous-sol, Cuisine, Tableau) ou prenez directement vos photos ici.
                 </p>
+                <button
+                  type="button"
+                  onClick={() => handleSelectCurrent(true)}
+                  className="min-h-[44px] px-4 rounded-xl bg-amber-500 text-slate-950 text-xs font-semibold hover:bg-amber-400 inline-flex items-center gap-2 cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Prendre des photos dans « {currentFolder.name} »</span>
+                </button>
               </div>
             ) : (
               <ul className="divide-y divide-slate-100">
-                {folderItems.map((folder) => {
-                  const isActive =
-                    activeTarget?.id === folder.id && activeTarget?.source === source;
+                {folders.map((folder) => {
+                  const isActive = activeTarget?.id === folder.id;
+                  const queuedCount = countPhotosInSubtree(folder.id, folder.name);
+
                   return (
                     <li
                       key={folder.id}
@@ -422,9 +293,9 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                           <span className="block text-sm font-medium text-slate-900 truncate">
                             {folder.name}
                           </span>
-                          {typeof folder.childCount === 'number' && (
+                          {queuedCount > 0 && (
                             <span className="block text-xs text-slate-500 tabular-nums">
-                              {folder.childCount} élément{folder.childCount > 1 ? 's' : ''}
+                              {queuedCount} photo{queuedCount > 1 ? 's' : ''}
                             </span>
                           )}
                         </span>
@@ -437,8 +308,18 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                           className="min-h-[40px] px-3 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-900 hover:text-white hover:border-slate-900 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                         >
                           <Camera className="w-3.5 h-3.5" />
-                          <span className="hidden sm:inline">Photos ici</span>
+                          <span>Photos</span>
                         </button>
+                        {queuedCount === 0 && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteFolder(folder.id)}
+                            aria-label={`Supprimer ${folder.name}`}
+                            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => enterFolder(folder)}
@@ -451,41 +332,12 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                     </li>
                   );
                 })}
-
-                {photoItems.map((img) => (
-                  <li
-                    key={img.id}
-                    className="flex items-center justify-between gap-3 px-4 min-h-[52px] text-slate-600"
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
-                        <ImageIcon className="w-4 h-4 text-slate-500" />
-                      </span>
-                      <div className="min-w-0">
-                        <div className="text-xs font-mono text-slate-800 truncate">{img.name}</div>
-                        <div className="text-xs text-slate-500 tabular-nums">
-                          {img.size ? formatBytes(img.size) : ''}
-                        </div>
-                      </div>
-                    </div>
-                    {img.webUrl && (
-                      <a
-                        href={img.webUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs font-medium text-sky-700 hover:underline whitespace-nowrap shrink-0"
-                      >
-                        Ouvrir
-                      </a>
-                    )}
-                  </li>
-                ))}
               </ul>
             )}
           </div>
         </div>
 
-        {/* Right Sidebar / Summary Panel on Desktop + Quick Shortcuts */}
+        {/* Right Sidebar */}
         <aside className="lg:col-span-4 space-y-5">
           {/* Active Destination Card */}
           <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
@@ -499,13 +351,10 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                   <p className="mt-1 text-xs text-slate-600 leading-relaxed">
                     {activeTarget.pathSegments.map((s) => s.name).join(' / ')}
                   </p>
-                  <div className="mt-2 text-xs text-slate-500">
-                    Stockage : {activeTarget.source === 'onedrive' ? 'Microsoft OneDrive' : 'Local hors-ligne'}
-                  </div>
                 </>
               ) : (
                 <p className="mt-1 text-sm text-slate-600">
-                  Aucun dossier sélectionné. Choisissez un chantier ou sous-dossier ci-contre.
+                  Sélectionnez un chantier ou sous-dossier pour commencer vos photos.
                 </p>
               )}
             </div>
@@ -522,11 +371,36 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
               <Camera className="w-4 h-4" />
               <span>
                 {activeTarget
-                  ? 'Ouvrir l’appareil photo'
+                  ? 'Prendre des photos'
                   : `Utiliser « ${currentFolder.name} »`}
               </span>
             </button>
           </div>
+
+          {/* Photos Ready for PC Transfer */}
+          {photos.length > 0 && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Prêt pour le PC boulot
+                </h3>
+                <span className="text-xs font-mono font-semibold text-amber-700 tabular-nums">
+                  {photos.length} photo{photos.length > 1 ? 's' : ''}
+                </span>
+              </div>
+              <p className="text-xs text-slate-600">
+                Transférez vos photos déjà classées vers votre PC puis supprimez-les automatiquement de l’appli.
+              </p>
+              <button
+                type="button"
+                onClick={onOpenTransfer}
+                className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition-colors inline-flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <span>Transférer vers le PC</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
 
           {/* Recent Sites for 1-Tap Arrival */}
           {recentTargets.length > 0 && (
@@ -536,7 +410,7 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
               </h3>
               <ul className="divide-y divide-slate-100">
                 {recentTargets.map((target) => (
-                  <li key={`${target.source}_${target.id}`} className="py-2 first:pt-0 last:pb-0">
+                  <li key={target.id} className="py-2 first:pt-0 last:pb-0">
                     <button
                       type="button"
                       onClick={() => onSelectTarget(target, true)}

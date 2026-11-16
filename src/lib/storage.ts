@@ -1,3 +1,4 @@
+import JSZip from 'jszip';
 import { CaptureSettings, LocalFolderRecord, QueuedPhoto, TargetFolder } from '../types';
 
 const DB_NAME = 'chantiershot_db';
@@ -65,20 +66,31 @@ export async function deletePhotoRecord(id: string): Promise<void> {
   });
 }
 
-export async function clearSyncedPhotos(): Promise<void> {
-  const all = await getAllPhotos();
+export async function deletePhotosByIds(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(PHOTOS_STORE, 'readwrite');
     const store = tx.objectStore(PHOTOS_STORE);
-    for (const item of all) {
-      if (item.status === 'synced') {
-        store.delete(item.id);
-      }
+    for (const id of ids) {
+      store.delete(id);
     }
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+}
+
+export async function buildPhotosZipBlob(photos: QueuedPhoto[]): Promise<Blob> {
+  const zip = new JSZip();
+  for (const photo of photos) {
+    const cleanSegments = photo.folderPath
+      .split('/')
+      .map((s) => s.trim().replace(/[\\:*?"<>|]/g, '-'))
+      .filter((s) => s && s !== 'Mes chantiers' && s !== 'Chantiers locaux');
+    const pathPrefix = cleanSegments.length > 0 ? cleanSegments.join('/') : 'Chantier';
+    zip.file(`${pathPrefix}/${photo.filename}`, photo.blob, { compression: 'STORE' });
+  }
+  return zip.generateAsync({ type: 'blob' });
 }
 
 // --- Local Offline Folders in IndexedDB ---
@@ -159,14 +171,121 @@ export async function createLocalFolder(parentId: string, name: string): Promise
   return record;
 }
 
+export async function deleteLocalFolderRecursive(folderId: string): Promise<void> {
+  const all = await getAllLocalFolders();
+  const toDelete = new Set<string>([folderId]);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const f of all) {
+      if (toDelete.has(f.parentId) && !toDelete.has(f.id)) {
+        toDelete.add(f.id);
+        added = true;
+      }
+    }
+  }
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(FOLDERS_STORE, 'readwrite');
+    const store = tx.objectStore(FOLDERS_STORE);
+    for (const id of toDelete) {
+      store.delete(id);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 // --- Settings & Recent Targets (localStorage) ---
 
 const DEFAULT_SETTINGS: CaptureSettings = {
   prefix: '',
   burnStamp: true,
-  autoPurgeAfterSync: true,
-  jpegQuality: 0.9,
+  jpegQuality: 0.85,
 };
+
+export const MAX_PHOTO_MEGAPIXELS = 15_000_000;
+
+export function drawCornerStamp(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  folderLabel: string
+): void {
+  const now = new Date();
+  const label = `${now.toLocaleDateString('fr-FR')} ${now.toLocaleTimeString('fr-FR', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })} — ${folderLabel}`;
+
+  const fontSize = Math.max(18, Math.round(width * 0.018));
+  ctx.font = `600 ${fontSize}px sans-serif`;
+  const metrics = ctx.measureText(label);
+  const padX = Math.round(fontSize * 0.7);
+  const padY = Math.round(fontSize * 0.45);
+  const boxW = Math.min(width - 24, metrics.width + padX * 2);
+  const boxH = fontSize + padY * 2;
+  const x = width - boxW - 16;
+  const y = height - boxH - 16;
+
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
+  ctx.beginPath();
+  ctx.roundRect(x, y, boxW, boxH, 8);
+  ctx.fill();
+
+  ctx.fillStyle = '#F8FAFC';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + padX, y + boxH / 2, boxW - padX * 2);
+}
+
+export async function normalizeBlobToMax15MP(
+  sourceBlob: Blob,
+  options: { stampFolderLabel?: string; quality?: number }
+): Promise<Blob> {
+  const quality = options.quality ?? 0.85;
+  const bitmap = await createImageBitmap(sourceBlob);
+  try {
+    const srcW = bitmap.width;
+    const srcH = bitmap.height;
+    const totalPixels = srcW * srcH;
+    const needsResize = totalPixels > MAX_PHOTO_MEGAPIXELS;
+    const needsStamp = Boolean(options.stampFolderLabel);
+
+    if (
+      !needsResize &&
+      !needsStamp &&
+      sourceBlob.type === 'image/jpeg' &&
+      sourceBlob.size <= 3_800_000
+    ) {
+      return sourceBlob;
+    }
+
+    const scale = needsResize ? Math.sqrt(MAX_PHOTO_MEGAPIXELS / totalPixels) : 1;
+    const targetW = Math.max(1, Math.round(srcW * scale));
+    const targetH = Math.max(1, Math.round(srcH * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return sourceBlob;
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+
+    if (options.stampFolderLabel) {
+      drawCornerStamp(ctx, targetW, targetH, options.stampFolderLabel);
+    }
+
+    const output = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), 'image/jpeg', quality)
+    );
+    return output || sourceBlob;
+  } finally {
+    bitmap.close();
+  }
+}
 
 export function loadCaptureSettings(): CaptureSettings {
   try {
@@ -198,10 +317,7 @@ export function saveActiveTarget(target: TargetFolder | null): void {
   }
   localStorage.setItem(ACTIVE_TARGET_KEY, JSON.stringify(target));
 
-  // Update recent targets list (max 5)
-  const recents = loadRecentTargets().filter(
-    (item) => !(item.id === target.id && item.source === target.source)
-  );
+  const recents = loadRecentTargets().filter((item) => item.id !== target.id);
   recents.unshift(target);
   localStorage.setItem(RECENT_TARGETS_KEY, JSON.stringify(recents.slice(0, 5)));
 }

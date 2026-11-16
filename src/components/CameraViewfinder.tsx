@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Camera,
-  CheckCircle2,
+  Check,
   FolderOpen,
   Grid3X3,
   ImagePlus,
@@ -9,19 +10,25 @@ import {
   RefreshCw,
   Stamp,
   SwitchCamera,
-  AlertCircle,
+  ZoomIn,
 } from 'lucide-react';
 import { CaptureSettings, QueuedPhoto, TargetFolder } from '../types';
-import { buildPhotoFilename } from '../lib/storage';
+import {
+  buildPhotoFilename,
+  drawCornerStamp,
+  MAX_PHOTO_MEGAPIXELS,
+  normalizeBlobToMax15MP,
+} from '../lib/storage';
 
 interface CameraViewfinderProps {
   activeTarget: TargetFolder | null;
   settings: CaptureSettings;
   recentSessionPhotos: QueuedPhoto[];
+  totalStoredPhotos: number;
   onUpdateSettings: (next: CaptureSettings) => void;
   onPhotoCaptured: (blob: Blob, filename: string) => Promise<void>;
   onChangeFolder: () => void;
-  onOpenQueue: () => void;
+  onOpenTransfer: () => void;
 }
 
 const QUICK_PREFIXES = [
@@ -36,10 +43,11 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   activeTarget,
   settings,
   recentSessionPhotos,
+  totalStoredPhotos,
   onUpdateSettings,
   onPhotoCaptured,
   onChangeFolder,
-  onOpenQueue,
+  onOpenTransfer,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -55,12 +63,17 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   const [capturing, setCapturing] = useState(false);
   const [sessionCount, setSessionCount] = useState(0);
   const [lastThumbUrl, setLastThumbUrl] = useState<string | null>(null);
+  const [zoomRange, setZoomRange] = useState<{ min: number; max: number; step: number } | null>(
+    null
+  );
+  const [zoomValue, setZoomValue] = useState(1);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
+    setZoomRange(null);
   }, []);
 
   const startCamera = useCallback(
@@ -69,7 +82,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setCameraState('unavailable');
         setCameraError(
-          "L'accès caméra direct n'est pas supporté par ce navigateur. Utilisez l'appareil photo natif ci-dessous."
+          "L'accès caméra direct n'est pas supporté par ce navigateur. Utilisez l'appareil photo du téléphone ci-dessous."
         );
         return;
       }
@@ -88,6 +101,23 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
         });
 
         streamRef.current = stream;
+
+        // Check hardware zoom support on smartphone lens
+        const track = stream.getVideoTracks()[0];
+        if (track && typeof track.getCapabilities === 'function') {
+          const caps = track.getCapabilities() as MediaTrackCapabilities & {
+            zoom?: { min: number; max: number; step: number };
+          };
+          if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+            setZoomRange({
+              min: caps.zoom.min,
+              max: Math.min(caps.zoom.max, 6),
+              step: caps.zoom.step || 0.1,
+            });
+            setZoomValue(caps.zoom.min);
+          }
+        }
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
@@ -97,13 +127,33 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
         setCameraState('unavailable');
         const msg =
           err instanceof Error && err.name === 'NotAllowedError'
-            ? "Permission caméra refusée. Autorisez la caméra dans le navigateur ou utilisez l'appareil photo du téléphone."
-            : "Aucune caméra active détectée dans cet environnement. Vous pouvez prendre ou importer des photos via le bouton natif.";
+            ? "Permission caméra refusée. Autorisez la caméra ou utilisez le bouton d'appareil natif."
+            : "Aucune caméra directe détectée. Utilisez le bouton d'appareil photo natif ci-dessous.";
         setCameraError(msg);
       }
     },
     [stopCamera]
   );
+
+  // Keep smartphone screen awake while taking site photos
+  useEffect(() => {
+    if (!activeTarget) return;
+    let wakeLock: { release: () => Promise<void> } | null = null;
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> };
+    };
+    if (nav.wakeLock) {
+      nav.wakeLock
+        .request('screen')
+        .then((lock) => {
+          wakeLock = lock;
+        })
+        .catch(() => {});
+    }
+    return () => {
+      wakeLock?.release().catch(() => {});
+    };
+  }, [activeTarget]);
 
   useEffect(() => {
     if (activeTarget) {
@@ -114,7 +164,6 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
     };
   }, [activeTarget, facingMode, startCamera, stopCamera]);
 
-  // Keep latest session thumbnail URL clean
   useEffect(() => {
     if (recentSessionPhotos.length === 0) {
       setLastThumbUrl(null);
@@ -125,45 +174,32 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
     return () => URL.revokeObjectURL(url);
   }, [recentSessionPhotos]);
 
-  const stampCanvas = (
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-    folderLabel: string
-  ) => {
-    if (!settings.burnStamp) return;
-    const now = new Date();
-    const label = `${now.toLocaleDateString('fr-FR')} ${now.toLocaleTimeString('fr-FR', {
-      hour: '2-digit',
-      minute: '2-digit',
-    })} — ${folderLabel}`;
-
-    const fontSize = Math.max(18, Math.round(width * 0.018));
-    ctx.font = `600 ${fontSize}px sans-serif`;
-    const metrics = ctx.measureText(label);
-    const padX = Math.round(fontSize * 0.7);
-    const padY = Math.round(fontSize * 0.45);
-    const boxW = Math.min(width - 24, metrics.width + padX * 2);
-    const boxH = fontSize + padY * 2;
-    const x = width - boxW - 16;
-    const y = height - boxH - 16;
-
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
-    ctx.beginPath();
-    ctx.roundRect(x, y, boxW, boxH, 8);
-    ctx.fill();
-
-    ctx.fillStyle = '#F8FAFC';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(label, x + padX, y + boxH / 2, boxW - padX * 2);
+  const handleZoomChange = async (val: number) => {
+    setZoomValue(val);
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    try {
+      await track.applyConstraints({
+        advanced: [{ zoom: val } as MediaTrackConstraintSet],
+      });
+    } catch {
+      // Ignore unsupported zoom constraint
+    }
   };
 
   const handleCapture = async () => {
     if (!activeTarget || !videoRef.current || cameraState !== 'ready' || capturing) return;
 
     const video = videoRef.current;
-    const width = video.videoWidth || 1280;
-    const height = video.videoHeight || 720;
+    const srcW = video.videoWidth || 1280;
+    const srcH = video.videoHeight || 720;
+    const totalPixels = srcW * srcH;
+    const scale =
+      totalPixels > MAX_PHOTO_MEGAPIXELS
+        ? Math.sqrt(MAX_PHOTO_MEGAPIXELS / totalPixels)
+        : 1;
+    const width = Math.max(1, Math.round(srcW * scale));
+    const height = Math.max(1, Math.round(srcH * scale));
 
     setCapturing(true);
     setFlashActive(true);
@@ -176,9 +212,17 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('Canvas indisponible');
 
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(video, 0, 0, width, height);
-      const pathText = activeTarget.pathSegments.map((s) => s.name).join(' / ');
-      stampCanvas(ctx, width, height, pathText);
+
+      if (settings.burnStamp) {
+        const pathText = activeTarget.pathSegments
+          .filter((s) => s.id !== 'root')
+          .map((s) => s.name)
+          .join(' / ');
+        drawCornerStamp(ctx, width, height, pathText || activeTarget.name);
+      }
 
       const blob = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob((b) => resolve(b), 'image/jpeg', settings.jpegQuality)
@@ -199,34 +243,25 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
     if (!activeTarget || !e.target.files || e.target.files.length === 0) return;
     const files = Array.from(e.target.files);
     let seq = sessionCount;
+    const pathText = activeTarget.pathSegments
+      .filter((s) => s.id !== 'root')
+      .map((s) => s.name)
+      .join(' / ');
+    const stampLabel = settings.burnStamp ? pathText || activeTarget.name : undefined;
 
     for (const file of files) {
       seq += 1;
       const filename = buildPhotoFilename(settings.prefix, seq);
-      // Re-encode only if stamp is enabled, otherwise upload original JPEG directly
-      if (settings.burnStamp && file.type.startsWith('image/')) {
+      if (file.type.startsWith('image/')) {
         try {
-          const bitmap = await createImageBitmap(file);
-          const canvas = document.createElement('canvas');
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(bitmap, 0, 0);
-            const pathText = activeTarget.pathSegments.map((s) => s.name).join(' / ');
-            stampCanvas(ctx, bitmap.width, bitmap.height, pathText);
-            const stampedBlob = await new Promise<Blob | null>((resolve) =>
-              canvas.toBlob((b) => resolve(b), 'image/jpeg', settings.jpegQuality)
-            );
-            bitmap.close();
-            if (stampedBlob) {
-              await onPhotoCaptured(stampedBlob, filename);
-              continue;
-            }
-          }
-          bitmap.close();
+          const processed = await normalizeBlobToMax15MP(file, {
+            stampFolderLabel: stampLabel,
+            quality: settings.jpegQuality,
+          });
+          await onPhotoCaptured(processed, filename);
+          continue;
         } catch {
-          // Fallback to raw file below
+          // Fallback to original file if browser cannot decode format
         }
       }
       await onPhotoCaptured(file, filename);
@@ -247,7 +282,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
             Choisissez d'abord votre chantier
           </h2>
           <p className="text-sm text-slate-600 max-w-md mx-auto">
-            Sélectionnez le dossier, sous-dossier ou sous-sous-dossier dans lequel vos photos doivent être rangées automatiquement.
+            Sélectionnez le dossier, sous-dossier ou sous-sous-dossier dans lequel vos photos doivent être classées.
           </p>
           <button
             type="button"
@@ -262,21 +297,18 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
     );
   }
 
-  const fullPath = activeTarget.pathSegments.map((s) => s.name).join(' / ');
-  const syncedCount = recentSessionPhotos.filter((p) => p.status === 'synced').length;
-  const pendingCount = recentSessionPhotos.filter(
-    (p) => p.status === 'pending' || p.status === 'uploading'
-  ).length;
+  const displaySegments = activeTarget.pathSegments.filter((s) => s.id !== 'root');
+  const fullPath =
+    displaySegments.length > 0
+      ? displaySegments.map((s) => s.name).join(' / ')
+      : activeTarget.name;
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-3 sm:px-6 py-3 sm:py-5 pb-28 lg:pb-8">
+    <div className="mx-auto w-full max-w-6xl px-3 sm:px-6 py-3 sm:py-5">
       {/* Locked Destination Strip */}
       <div className="mb-3 sm:mb-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-xs text-slate-500">
-            Enregistrement direct vers{' '}
-            {activeTarget.source === 'onedrive' ? 'OneDrive' : 'Dossier local'}
-          </div>
+          <div className="text-xs text-slate-500">Classement direct dans</div>
           <div className="text-sm font-semibold text-slate-900 truncate">{fullPath}</div>
         </div>
         <button
@@ -353,6 +385,26 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
               </div>
             </div>
 
+            {/* Hardware Zoom Bar (shown on supported smartphone cameras) */}
+            {zoomRange && cameraState === 'ready' && (
+              <div className="absolute bottom-24 left-1/2 -translate-x-1/2 flex items-center gap-2.5 px-3 py-1.5 rounded-xl bg-slate-950/65 backdrop-blur-md text-white">
+                <ZoomIn className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <input
+                  type="range"
+                  min={zoomRange.min}
+                  max={zoomRange.max}
+                  step={zoomRange.step}
+                  value={zoomValue}
+                  onChange={(e) => handleZoomChange(Number(e.target.value))}
+                  aria-label="Zoom caméra"
+                  className="w-28 accent-amber-500"
+                />
+                <span className="text-xs font-mono tabular-nums w-8 text-right">
+                  {zoomValue.toFixed(1)}x
+                </span>
+              </div>
+            )}
+
             {/* Initializing / Unavailable State */}
             {cameraState === 'initializing' && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-300 p-6 text-center">
@@ -388,10 +440,10 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
 
             {/* Bottom Shutter Bar inside Viewfinder (Thumb-Zone) */}
             <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950/90 via-slate-950/55 to-transparent pt-8 pb-4 px-5 flex items-center justify-between gap-4">
-              {/* Left: Last Capture Thumbnail / Queue shortcut */}
+              {/* Left: Last Capture Thumbnail / Transfer shortcut */}
               <button
                 type="button"
-                onClick={onOpenQueue}
+                onClick={onOpenTransfer}
                 className="w-12 h-12 rounded-xl overflow-hidden border-2 border-white/30 bg-slate-900 flex items-center justify-center shrink-0 cursor-pointer"
                 aria-label="Voir les photos capturées"
               >
@@ -421,7 +473,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 <span className="w-[56px] h-[56px] rounded-full border-2 border-slate-950/20" />
               </button>
 
-              {/* Right: Native Camera / Multi-import trigger (e.g., ultra-wide phone lens) */}
+              {/* Right: Native Camera / Multi-import trigger (e.g. ultra-wide 0.5x) */}
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
@@ -513,30 +565,30 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
             </div>
           </div>
 
-          {/* Live Transfer Status for Active Folder */}
+          {/* Live Session Photos for Active Folder */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-900">Envoi automatique</h3>
+              <h3 className="text-sm font-semibold text-slate-900">Photos classées</h3>
               <button
                 type="button"
-                onClick={onOpenQueue}
+                onClick={onOpenTransfer}
                 className="text-xs font-medium text-sky-700 hover:underline cursor-pointer"
               >
-                Voir la file
+                Transférer
               </button>
             </div>
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div className="rounded-xl bg-slate-50 border border-slate-100 p-3">
-                <div className="text-slate-500">Synchronisées</div>
+                <div className="text-slate-500">Dans ce dossier</div>
                 <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
-                  {syncedCount}
+                  {recentSessionPhotos.length}
                 </div>
               </div>
               <div className="rounded-xl bg-slate-50 border border-slate-100 p-3">
-                <div className="text-slate-500">En attente</div>
+                <div className="text-slate-500">Total dans l’appli</div>
                 <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
-                  {pendingCount}
+                  {totalStoredPhotos}
                 </div>
               </div>
             </div>
@@ -546,22 +598,9 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 {recentSessionPhotos.slice(0, 4).map((p) => (
                   <li key={p.id} className="py-2 flex items-center justify-between gap-2 text-xs">
                     <span className="font-mono text-slate-700 truncate">{p.filename}</span>
-                    <span className="shrink-0 inline-flex items-center gap-1 font-medium">
-                      {p.status === 'synced' ? (
-                        <span className="text-emerald-700 inline-flex items-center gap-1">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          OneDrive
-                        </span>
-                      ) : p.status === 'uploading' ? (
-                        <span className="text-sky-700 inline-flex items-center gap-1">
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          Envoi
-                        </span>
-                      ) : p.status === 'error' ? (
-                        <span className="text-red-700">Erreur</span>
-                      ) : (
-                        <span className="text-amber-700">File locale</span>
-                      )}
+                    <span className="shrink-0 inline-flex items-center gap-1 font-medium text-emerald-700">
+                      <Check className="w-3.5 h-3.5" />
+                      Classée
                     </span>
                   </li>
                 ))}
