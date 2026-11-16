@@ -1,20 +1,22 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   CheckCircle2,
   Download,
   FolderOutput,
   Laptop,
+  Layers,
   Loader2,
   Send,
   Smartphone,
   Trash2,
 } from 'lucide-react';
-import { QueuedPhoto } from '../types';
+import { LocalFolderRecord, QueuedPhoto } from '../types';
 import {
   buildPhotosZipBlob,
   formatBytes,
-  getAllUserFolderPaths,
+  getDescendantIdsFromList,
+  getFolderPathsFromList,
 } from '../lib/storage';
 import {
   P2PReceiverSession,
@@ -63,6 +65,10 @@ interface TransferRoomStatus {
 
 interface UploadQueueProps {
   photos: QueuedPhoto[];
+  allFolders: LocalFolderRecord[];
+  selectedChantier: LocalFolderRecord | null;
+  transferScope: 'all' | 'chantier';
+  onChangeTransferScope: (scope: 'all' | 'chantier') => void;
   isOnline: boolean;
   pendingPcAck: {
     code: string;
@@ -107,6 +113,10 @@ const PhotoThumbnail: React.FC<{ blob: Blob; alt: string }> = ({ blob, alt }) =>
 
 export const UploadQueue: React.FC<UploadQueueProps> = ({
   photos,
+  allFolders,
+  selectedChantier,
+  transferScope,
+  onChangeTransferScope,
   isOnline,
   pendingPcAck,
   onStartWaitingPcAck,
@@ -133,6 +143,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
   // Phone Local ZIP State
   const [exportingZip, setExportingZip] = useState(false);
   const [deleteAfterZip, setDeleteAfterZip] = useState(true);
+  const [confirmEmptyPhotos, setConfirmEmptyPhotos] = useState(false);
 
   // PC Receiver State (supports both HTTP Relay and WebRTC P2P for GitHub Pages)
   const [pcTransport, setPcTransport] = useState<'http' | 'p2p' | null>(null);
@@ -153,7 +164,48 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
     'showDirectoryPicker' in window &&
     window.self === window.top;
 
+  const isChantierScoped = transferScope === 'chantier' && Boolean(selectedChantier);
+
+  const selectedChantierIds = useMemo(
+    () =>
+      selectedChantier
+        ? getDescendantIdsFromList(allFolders, selectedChantier.id)
+        : new Set<string>(),
+    [allFolders, selectedChantier]
+  );
+
+  const selectedChantierPhotosCount = useMemo(
+    () =>
+      selectedChantier
+        ? photos.filter((p) => selectedChantierIds.has(p.folderId)).length
+        : 0,
+    [photos, selectedChantier, selectedChantierIds]
+  );
+
+  const scopedPhotos = useMemo(
+    () =>
+      isChantierScoped
+        ? photos.filter((p) => selectedChantierIds.has(p.folderId))
+        : photos,
+    [isChantierScoped, photos, selectedChantierIds]
+  );
+
+  const scopedFolderPaths = useMemo(
+    () =>
+      getFolderPathsFromList(
+        allFolders,
+        isChantierScoped && selectedChantier ? selectedChantier.id : undefined
+      ),
+    [allFolders, isChantierScoped, selectedChantier]
+  );
+
+  const scopeLabel =
+    isChantierScoped && selectedChantier
+      ? `Chantier « ${selectedChantier.name} »`
+      : 'Tous les chantiers';
+
   const totalBytes = photos.reduce((acc, p) => acc + p.size, 0);
+  const scopedBytes = scopedPhotos.reduce((acc, p) => acc + p.size, 0);
 
   useEffect(() => {
     if (!navigator.storage || typeof navigator.storage.estimate !== 'function') return;
@@ -213,11 +265,11 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
   const handleSendToPc = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanCode = targetCode.replace(/\D/g, '');
-    if (cleanCode.length !== 6 || photos.length === 0) return;
+    if (cleanCode.length !== 6 || scopedPhotos.length === 0) return;
 
     setSendingToPc(true);
     setPhoneTransferMsg(null);
-    setSendProgress({ sent: 0, total: photos.length });
+    setSendProgress({ sent: 0, total: scopedPhotos.length });
 
     try {
       // Detect if Node HTTP relay is available; otherwise use WebRTC P2P (works on GitHub Pages)
@@ -236,7 +288,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
         useHttp = false;
       }
 
-      const folderPaths = await getAllUserFolderPaths();
+      const folderPaths = scopedFolderPaths;
       const sentIds: string[] = [];
 
       if (useHttp) {
@@ -248,8 +300,8 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
           }).catch(() => {});
         }
 
-        for (let i = 0; i < photos.length; i++) {
-          const photo = photos[i];
+        for (let i = 0; i < scopedPhotos.length; i++) {
+          const photo = scopedPhotos[i];
           const res = await fetch(`./api/transfer/${cleanCode}/upload`, {
             method: 'POST',
             headers: {
@@ -265,7 +317,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
             throw new Error(`Échec sur ${photo.filename}`);
           }
           sentIds.push(photo.id);
-          setSendProgress({ sent: i + 1, total: photos.length });
+          setSendProgress({ sent: i + 1, total: scopedPhotos.length });
         }
 
         onStartWaitingPcAck({
@@ -275,11 +327,11 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
           mode: 'http',
         });
       } else {
-        const idsToSend = photos.map((p) => p.id);
+        const idsToSend = scopedPhotos.map((p) => p.id);
         let alreadyConfirmed = false;
         await sendPhotosViaP2P(
           cleanCode,
-          photos,
+          scopedPhotos,
           folderPaths,
           (sent, total) => setSendProgress({ sent, total }),
           async () => {
@@ -318,27 +370,35 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
   };
 
   const handleLocalZipExport = async () => {
-    if (photos.length === 0) return;
+    if (scopedPhotos.length === 0) return;
     setExportingZip(true);
     setPhoneTransferMsg(null);
     try {
-      const folderPaths = await getAllUserFolderPaths();
-      const zipBlob = await buildPhotosZipBlob(photos, folderPaths);
+      const zipBlob = await buildPhotosZipBlob(scopedPhotos, scopedFolderPaths);
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `Chantiers_${new Date().toISOString().slice(0, 10)}.zip`;
+      const safeSlug =
+        isChantierScoped && selectedChantier
+          ? selectedChantier.name
+              .trim()
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .replace(/[^a-zA-Z0-9_-]+/g, '_')
+              .replace(/^_+|_+$/g, '') || 'Chantier'
+          : 'Chantiers';
+      a.download = `${safeSlug}_${new Date().toISOString().slice(0, 10)}.zip`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
 
       if (deleteAfterZip && zipBlob.size > 0) {
-        const ids = photos.map((p) => p.id);
+        const ids = scopedPhotos.map((p) => p.id);
         await onDeletePhotosBatch(ids);
         setPhoneTransferMsg(
-          `1 seul ZIP téléchargé avec tout le classement ! Les ${ids.length} photo(s) ont été supprimées et votre arborescence de dossiers reste intacte dans l’appli.`
+          `1 seul ZIP téléchargé (${scopeLabel}) ! Les ${ids.length} photo(s) ont été supprimées et votre arborescence de dossiers reste intacte dans l’appli.`
         );
       } else {
-        setPhoneTransferMsg('Archive ZIP unique prête et téléchargée avec tout votre classement.');
+        setPhoneTransferMsg(`Archive ZIP unique prête et téléchargée (${scopeLabel}).`);
       }
     } finally {
       setExportingZip(false);
@@ -595,117 +655,160 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
 
       {/* PHONE SENDER VIEW */}
       {roleMode === 'phone' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
-          {/* Card 1: Direct Send to Work PC via 6-digit code */}
-          <div className="lg:col-span-7 rounded-2xl border border-slate-200 bg-white p-5 flex flex-col justify-between gap-4">
-            <div className="space-y-2">
-              <h2 className="text-base font-semibold text-slate-900">
-                1. Envoyer directement vers votre PC boulot
-              </h2>
-              <p className="text-sm text-slate-600">
-                Ouvrez ChantierShot sur votre PC du bureau, cliquez sur « Récupérer sur mon PC boulot », puis saisissez le code à 6 chiffres ci-dessous.
-              </p>
-            </div>
-
-            <form onSubmit={handleSendToPc} className="space-y-4">
-              <div className="flex flex-col sm:flex-row gap-3">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={targetCode}
-                  onChange={(e) => setTargetCode(e.target.value.replace(/\D/g, ''))}
-                  placeholder="Code à 6 chiffres (ex: 482915)"
-                  className="flex-1 min-h-[48px] px-4 rounded-xl border border-slate-300 text-base font-mono tracking-widest text-slate-900 placeholder:text-slate-400 placeholder:tracking-normal placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-amber-500"
-                />
+        <div className="space-y-4">
+          {selectedChantier && (
+            <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs text-slate-600">
+                Périmètre sélectionné : <strong className="text-slate-900">{scopeLabel}</strong>{' '}
+                <span className="tabular-nums text-slate-500">
+                  ({scopedPhotos.length} photo{scopedPhotos.length > 1 ? 's' : ''} · {formatBytes(scopedBytes)})
+                </span>
+              </div>
+              <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100">
                 <button
-                  type="submit"
-                  disabled={
-                    sendingToPc ||
-                    !isOnline ||
-                    photos.length === 0 ||
-                    targetCode.replace(/\D/g, '').length !== 6
-                  }
-                  className="min-h-[48px] px-5 rounded-xl bg-amber-500 text-slate-950 text-sm font-semibold hover:bg-amber-400 disabled:opacity-50 inline-flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
+                  type="button"
+                  onClick={() => onChangeTransferScope('all')}
+                  className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                    !isChantierScoped
+                      ? 'bg-slate-900 text-white'
+                      : 'text-slate-700 hover:text-slate-950'
+                  }`}
                 >
-                  {sendingToPc ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Tous les chantiers ({photos.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeTransferScope('chantier')}
+                  className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                    isChantierScoped
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'text-slate-700 hover:text-slate-950'
+                  }`}
+                >
+                  <span className="max-w-[140px] truncate">{selectedChantier.name}</span>
+                  <span className="tabular-nums">({selectedChantierPhotosCount})</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+            {/* Card 1: Direct Send to Work PC via 6-digit code */}
+            <div className="lg:col-span-7 rounded-2xl border border-slate-200 bg-white p-5 flex flex-col justify-between gap-4">
+              <div className="space-y-2">
+                <h2 className="text-base font-semibold text-slate-900">
+                  1. Envoyer vers votre PC boulot ({scopeLabel})
+                </h2>
+                <p className="text-sm text-slate-600">
+                  Ouvrez ChantierShot sur votre PC du bureau, cliquez sur « Récupérer sur mon PC boulot », puis saisissez le code à 6 chiffres ci-dessous.
+                </p>
+              </div>
+
+              <form onSubmit={handleSendToPc} className="space-y-4">
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={targetCode}
+                    onChange={(e) => setTargetCode(e.target.value.replace(/\D/g, ''))}
+                    placeholder="Code à 6 chiffres (ex: 482915)"
+                    className="flex-1 min-h-[48px] px-4 rounded-xl border border-slate-300 text-base font-mono tracking-widest text-slate-900 placeholder:text-slate-400 placeholder:tracking-normal placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={
+                      sendingToPc ||
+                      !isOnline ||
+                      scopedPhotos.length === 0 ||
+                      targetCode.replace(/\D/g, '').length !== 6
+                    }
+                    className="min-h-[48px] px-5 rounded-xl bg-amber-500 text-slate-950 text-sm font-semibold hover:bg-amber-400 disabled:opacity-50 inline-flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
+                  >
+                    {sendingToPc ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Send className="w-4 h-4" />
+                    )}
+                    <span>
+                      {sendProgress && sendingToPc
+                        ? `Envoi ${sendProgress.sent}/${sendProgress.total}...`
+                        : `Envoyer (${scopedPhotos.length})`}
+                    </span>
+                  </button>
+                </div>
+
+                <label className="flex items-center gap-2.5 text-xs text-slate-700 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={autoDeleteAfterPc}
+                    onChange={(e) => setAutoDeleteAfterPc(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <span>
+                    Supprimer automatiquement les photos transférées après confirmation du PC (vos dossiers restent conservés)
+                  </span>
+                </label>
+              </form>
+
+              {(phoneTransferMsg || pendingPcAck) && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs font-medium text-slate-800 flex items-center gap-2">
+                  {pendingPcAck ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-sky-600 shrink-0" />
                   ) : (
-                    <Send className="w-4 h-4" />
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                   )}
                   <span>
-                    {sendProgress && sendingToPc
-                      ? `Envoi ${sendProgress.sent}/${sendProgress.total}...`
-                      : `Envoyer (${photos.length})`}
+                    {phoneTransferMsg ||
+                      `En attente de confirmation du PC (code ${pendingPcAck?.code}) pour supprimer automatiquement les ${pendingPcAck?.sentIds.length} photo(s)...`}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Card 2: Instant 1-ZIP Export + Photo-Only Cleanup */}
+            <div className="lg:col-span-5 rounded-2xl border border-slate-200 bg-white p-5 flex flex-col justify-between gap-4">
+              <div className="space-y-2">
+                <h2 className="text-base font-semibold text-slate-900">
+                  2. Tout copier en 1 seul ZIP classé
+                </h2>
+                <p className="text-sm text-slate-600">
+                  Regroupe {isChantierScoped ? 'ce chantier et ses sous-dossiers' : 'tous vos chantiers et sous-dossiers'} dans un seul ZIP, même hors-ligne.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <label className="flex items-center gap-2.5 text-xs text-slate-700 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={deleteAfterZip}
+                    onChange={(e) => setDeleteAfterZip(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <span>
+                    Supprimer les photos exportées après création du ZIP (vos dossiers restent dans l’appli)
+                  </span>
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleLocalZipExport}
+                  disabled={exportingZip || scopedPhotos.length === 0}
+                  className="w-full min-h-[48px] px-4 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 disabled:opacity-50 inline-flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {exportingZip ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Archive className="w-4 h-4" />
+                  )}
+                  <span>
+                    {isChantierScoped && selectedChantier
+                      ? `ZIP « ${selectedChantier.name} » (${scopedPhotos.length})`
+                      : `Tout télécharger en 1 ZIP (${scopedPhotos.length})`}
                   </span>
                 </button>
               </div>
-
-              <label className="flex items-center gap-2.5 text-xs text-slate-700 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={autoDeleteAfterPc}
-                  onChange={(e) => setAutoDeleteAfterPc(e.target.checked)}
-                  className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
-                />
-                <span>
-                  Supprimer automatiquement les photos après transfert PC (vos dossiers de chantier restent conservés)
-                </span>
-              </label>
-            </form>
-
-            {(phoneTransferMsg || pendingPcAck) && (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs font-medium text-slate-800 flex items-center gap-2">
-                {pendingPcAck ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-sky-600 shrink-0" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                )}
-                <span>
-                  {phoneTransferMsg ||
-                    `En attente de confirmation du PC (code ${pendingPcAck?.code}) pour supprimer automatiquement les ${pendingPcAck?.sentIds.length} photo(s)...`}
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Card 2: Instant 1-ZIP Export + Photo-Only Cleanup */}
-          <div className="lg:col-span-5 rounded-2xl border border-slate-200 bg-white p-5 flex flex-col justify-between gap-4">
-            <div className="space-y-2">
-              <h2 className="text-base font-semibold text-slate-900">
-                2. Tout copier en 1 seul ZIP classé
-              </h2>
-              <p className="text-sm text-slate-600">
-                Regroupe toutes vos photos dans un seul fichier ZIP avec votre arborescence exacte de chantiers et sous-dossiers, même hors-ligne.
-              </p>
-            </div>
-
-            <div className="space-y-3">
-              <label className="flex items-center gap-2.5 text-xs text-slate-700 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={deleteAfterZip}
-                  onChange={(e) => setDeleteAfterZip(e.target.checked)}
-                  className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
-                />
-                <span>
-                  Supprimer toutes les photos après création du ZIP (vos dossiers restent dans l’appli)
-                </span>
-              </label>
-
-              <button
-                type="button"
-                onClick={handleLocalZipExport}
-                disabled={exportingZip || photos.length === 0}
-                className="w-full min-h-[48px] px-4 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 disabled:opacity-50 inline-flex items-center justify-center gap-2 cursor-pointer"
-              >
-                {exportingZip ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Archive className="w-4 h-4" />
-                )}
-                <span>Tout télécharger en 1 ZIP ({photos.length})</span>
-              </button>
             </div>
           </div>
         </div>
@@ -835,30 +938,58 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
         </div>
       )}
 
-      {/* Stored Photos List */}
+      {/* Stored Photos List (filtered by scope) */}
       <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-4">
           <h2 className="text-sm font-semibold text-slate-900">
-            Photos stockées dans l’application
+            Photos ({scopeLabel})
           </h2>
-          {photos.length > 0 && (
+          {scopedPhotos.length > 0 && (
             <button
               type="button"
-              onClick={() => onDeletePhotosBatch(photos.map((p) => p.id))}
+              onClick={() => setConfirmEmptyPhotos((v) => !v)}
               className="text-xs font-medium text-red-600 hover:underline cursor-pointer"
             >
-              Tout vider ({photos.length})
+              Tout vider ({scopedPhotos.length})
             </button>
           )}
         </div>
 
-        {photos.length === 0 ? (
+        {confirmEmptyPhotos && scopedPhotos.length > 0 && (
+          <div className="px-4 py-3 bg-red-50 border-b border-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <span className="text-xs text-red-900">
+              <strong>Vérification :</strong> supprimer définitivement ces{' '}
+              <strong>{scopedPhotos.length}</strong> photo(s) ({scopeLabel}) ? Vos dossiers de chantier resteront intacts.
+            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={async () => {
+                  await onDeletePhotosBatch(scopedPhotos.map((p) => p.id));
+                  setConfirmEmptyPhotos(false);
+                }}
+                className="min-h-[36px] px-3.5 rounded-lg bg-red-600 text-white text-xs font-semibold hover:bg-red-700 cursor-pointer"
+              >
+                Confirmer la suppression
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmEmptyPhotos(false)}
+                className="min-h-[36px] px-3 rounded-lg border border-red-200 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 cursor-pointer"
+              >
+                Annuler
+              </button>
+            </div>
+          </div>
+        )}
+
+        {scopedPhotos.length === 0 ? (
           <div className="py-10 px-4 text-center text-sm text-slate-500">
-            Aucune photo en attente sur cet appareil.
+            Aucune photo en attente pour {scopeLabel.toLowerCase()}.
           </div>
         ) : (
           <ul className="divide-y divide-slate-100">
-            {photos.map((photo) => (
+            {scopedPhotos.map((photo) => (
               <li
                 key={photo.id}
                 className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"

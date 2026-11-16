@@ -1,20 +1,26 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Camera,
+  FolderPlus,
   FolderTree,
+  Layers,
   ListChecks,
   WifiOff,
 } from 'lucide-react';
 import {
   CaptureSettings,
+  LocalFolderRecord,
   QueuedPhoto,
   TargetFolder,
 } from './types';
 import {
   buildPhotoFilename,
+  createLocalFolder,
   deletePhotoRecord,
   deletePhotosByIds,
+  getAllLocalFolders,
   getAllPhotos,
+  getDescendantIdsFromList,
   loadActiveTarget,
   loadCaptureSettings,
   loadRecentTargets,
@@ -46,6 +52,11 @@ export function App() {
     loadCaptureSettings()
   );
   const [photos, setPhotos] = useState<QueuedPhoto[]>([]);
+  const [allFolders, setAllFolders] = useState<LocalFolderRecord[]>([]);
+  const [selectedChantierId, setSelectedChantierId] = useState<string | null>(null);
+  const [transferScope, setTransferScope] = useState<'all' | 'chantier'>('all');
+  const [creatingChantierTab, setCreatingChantierTab] = useState(false);
+  const [newChantierName, setNewChantierName] = useState('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [pendingPcAck, setPendingPcAck] = useState<{
     code: string;
@@ -60,6 +71,19 @@ export function App() {
       return null;
     }
   });
+
+  const rootChantiers = useMemo(
+    () =>
+      allFolders
+        .filter((f) => f.parentId === 'root')
+        .sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' })),
+    [allFolders]
+  );
+
+  const selectedChantier = useMemo(
+    () => rootChantiers.find((c) => c.id === selectedChantierId) || rootChantiers[0] || null,
+    [rootChantiers, selectedChantierId]
+  );
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -85,6 +109,22 @@ export function App() {
     [showToast]
   );
 
+  const refreshFolders = useCallback(async () => {
+    try {
+      const list = await getAllLocalFolders();
+      setAllFolders(list);
+      const roots = list
+        .filter((f) => f.parentId === 'root')
+        .sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' }));
+      setSelectedChantierId((curr) => {
+        if (curr && roots.some((r) => r.id === curr)) return curr;
+        return roots[0]?.id ?? null;
+      });
+    } catch {
+      // Ignore IndexedDB error
+    }
+  }, []);
+
   const loadStoredPhotos = useCallback(async () => {
     try {
       const stored = await getAllPhotos();
@@ -96,10 +136,11 @@ export function App() {
 
   useEffect(() => {
     loadStoredPhotos();
+    refreshFolders();
     if (navigator.storage && typeof navigator.storage.persist === 'function') {
       navigator.storage.persist().catch(() => {});
     }
-  }, [loadStoredPhotos]);
+  }, [loadStoredPhotos, refreshFolders]);
 
   // Background poll for HTTP PC confirmation even if user switches tabs on phone
   useEffect(() => {
@@ -261,6 +302,36 @@ export function App() {
     }
   };
 
+  const handleCreateChantierTab = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = newChantierName.trim();
+    if (!trimmed) return;
+    const created = await createLocalFolder('root', trimmed);
+    setNewChantierName('');
+    setCreatingChantierTab(false);
+    await refreshFolders();
+    setSelectedChantierId(created.id);
+    const target: TargetFolder = {
+      id: created.id,
+      name: created.name,
+      pathSegments: [
+        { id: 'root', name: 'Mes chantiers' },
+        { id: created.id, name: created.name },
+      ],
+    };
+    setActiveTarget(target);
+    saveActiveTarget(target);
+    setRecentTargets(loadRecentTargets());
+  };
+
+  const countPhotosForChantier = useCallback(
+    (chantierId: string) => {
+      const ids = getDescendantIdsFromList(allFolders, chantierId);
+      return photos.filter((p) => ids.has(p.folderId)).length;
+    },
+    [allFolders, photos]
+  );
+
   const totalCount = photos.length;
 
   const sessionPhotosForActiveFolder = activeTarget
@@ -360,18 +431,122 @@ export function App() {
         </div>
       )}
 
+      {/* Chantier Tabs Bar — always visible except during Camera capture */}
+      {activeTab !== 'camera' && (
+        <div className="bg-white border-b border-slate-200">
+          <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 py-2 flex items-center gap-2 overflow-x-auto">
+            {activeTab === 'queue' && rootChantiers.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setTransferScope('all')}
+                className={`min-h-[38px] px-3.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                  transferScope === 'all'
+                    ? 'bg-slate-900 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Tous les chantiers</span>
+                <span className="tabular-nums opacity-80">({totalCount})</span>
+              </button>
+            )}
+
+            {rootChantiers.map((chantier) => {
+              const count = countPhotosForChantier(chantier.id);
+              const isSelected =
+                activeTab === 'queue'
+                  ? transferScope === 'chantier' && selectedChantier?.id === chantier.id
+                  : selectedChantier?.id === chantier.id;
+
+              return (
+                <button
+                  key={chantier.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedChantierId(chantier.id);
+                    if (activeTab === 'queue') {
+                      setTransferScope('chantier');
+                    }
+                  }}
+                  className={`min-h-[38px] px-3.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    isSelected
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  <span className="max-w-[160px] truncate">{chantier.name}</span>
+                  <span className="tabular-nums opacity-80">({count})</span>
+                </button>
+              );
+            })}
+
+            <button
+              type="button"
+              onClick={() => setCreatingChantierTab((v) => !v)}
+              className="min-h-[38px] px-3 rounded-xl border border-dashed border-slate-300 text-slate-700 text-xs font-semibold hover:border-amber-500 hover:text-slate-950 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <FolderPlus className="w-3.5 h-3.5 text-amber-600" />
+              <span>Nouveau chantier</span>
+            </button>
+          </div>
+
+          {creatingChantierTab && (
+            <form
+              onSubmit={handleCreateChantierTab}
+              className="mx-auto w-full max-w-6xl px-4 sm:px-6 pb-3 pt-1 flex flex-col sm:flex-row gap-2"
+            >
+              <input
+                type="text"
+                value={newChantierName}
+                onChange={(e) => setNewChantierName(e.target.value)}
+                placeholder="Nom du nouveau chantier (ex: Villa Martin, Résidence Parc)..."
+                autoFocus
+                className="flex-1 min-h-[42px] px-3.5 rounded-xl border border-slate-300 bg-slate-50 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="submit"
+                  disabled={!newChantierName.trim()}
+                  className="min-h-[42px] px-4 rounded-xl bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+                >
+                  Créer l’onglet
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreatingChantierTab(false);
+                    setNewChantierName('');
+                  }}
+                  className="min-h-[42px] px-3 rounded-xl border border-slate-300 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 cursor-pointer"
+                >
+                  Annuler
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      )}
+
       {/* Main Workspace */}
       <main className="flex-1 flex flex-col">
         <div className="flex-1">
           {activeTab === 'folders' && (
             <FolderExplorer
+              allFolders={allFolders}
+              rootChantiers={rootChantiers}
+              selectedChantier={selectedChantier}
               activeTarget={activeTarget}
               recentTargets={recentTargets}
               photos={photos}
               onSelectTarget={handleSelectTarget}
               onImportGalleryFiles={handleImportGalleryFiles}
+              onFoldersChanged={refreshFolders}
               onFoldersDeleted={handleFoldersDeleted}
-              onOpenTransfer={() => setActiveTab('queue')}
+              onOpenCreateChantier={() => setCreatingChantierTab(true)}
+              onOpenTransfer={(scope) => {
+                setTransferScope(scope);
+                setActiveTab('queue');
+              }}
             />
           )}
 
@@ -391,6 +566,10 @@ export function App() {
           {activeTab === 'queue' && (
             <UploadQueue
               photos={photos}
+              allFolders={allFolders}
+              selectedChantier={selectedChantier}
+              transferScope={transferScope}
+              onChangeTransferScope={setTransferScope}
               isOnline={isOnline}
               pendingPcAck={pendingPcAck}
               onStartWaitingPcAck={setPendingPcAck}

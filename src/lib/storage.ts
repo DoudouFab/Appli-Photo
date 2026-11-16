@@ -87,12 +87,36 @@ function sanitizeZipSegments(rawPath: string): string[] {
     .filter((s) => s && s !== '.' && s !== '..' && s !== 'Mes chantiers' && s !== 'Chantiers locaux');
 }
 
-export async function getAllUserFolderPaths(): Promise<string[]> {
-  const allFolders = await getAllLocalFolders();
+export function getDescendantIdsFromList(
+  allFolders: LocalFolderRecord[],
+  folderId: string
+): Set<string> {
+  const ids = new Set<string>([folderId]);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const f of allFolders) {
+      if (ids.has(f.parentId) && !ids.has(f.id)) {
+        ids.add(f.id);
+        added = true;
+      }
+    }
+  }
+  return ids;
+}
+
+export function getFolderPathsFromList(
+  allFolders: LocalFolderRecord[],
+  rootChantierId?: string
+): string[] {
   const byId = new Map(allFolders.map((f) => [f.id, f]));
+  const allowedIds = rootChantierId
+    ? getDescendantIdsFromList(allFolders, rootChantierId)
+    : null;
 
   const paths: string[] = [];
   for (const f of allFolders) {
+    if (allowedIds && !allowedIds.has(f.id)) continue;
     const segments: string[] = [];
     let curr: LocalFolderRecord | undefined = f;
     const guard = new Set<string>();
@@ -110,6 +134,11 @@ export async function getAllUserFolderPaths(): Promise<string[]> {
   }
 
   return Array.from(new Set(paths));
+}
+
+export async function getAllUserFolderPaths(rootChantierId?: string): Promise<string[]> {
+  const allFolders = await getAllLocalFolders();
+  return getFolderPathsFromList(allFolders, rootChantierId);
 }
 
 export async function buildPhotosZipBlob(
