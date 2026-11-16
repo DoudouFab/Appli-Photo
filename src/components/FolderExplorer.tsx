@@ -126,10 +126,17 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
   const photosInCurrent = photos.filter((p) => p.folderId === currentFolder.id);
 
   const countPhotosInSubtree = (folderId: string, folderName: string) => {
+    const prefixSegments = breadcrumbs
+      .filter((b) => b.id !== 'root')
+      .map((b) => b.name.trim());
+    prefixSegments.push(folderName.trim());
+    const expectedPrefix = prefixSegments.join(' / ');
+
     return photos.filter(
       (p) =>
         p.folderId === folderId ||
-        p.folderPath.split('/').some((seg) => seg.trim() === folderName)
+        p.folderPath === expectedPrefix ||
+        p.folderPath.startsWith(`${expectedPrefix} / `)
     ).length;
   };
 

@@ -11,7 +11,11 @@ import {
   Trash2,
 } from 'lucide-react';
 import { QueuedPhoto } from '../types';
-import { buildPhotosZipBlob, formatBytes } from '../lib/storage';
+import {
+  buildPhotosZipBlob,
+  formatBytes,
+  getAllUserFolderPaths,
+} from '../lib/storage';
 import {
   P2PReceiverSession,
   ReceivedPcPhoto,
@@ -53,6 +57,7 @@ interface TransferRoomStatus {
   received: boolean;
   photoCount: number;
   totalBytes: number;
+  folderPaths?: string[];
   items: TransferRoomItem[];
 }
 
@@ -134,6 +139,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
   const [pcCode, setPcCode] = useState<string | null>(null);
   const [pcRoomStatus, setPcRoomStatus] = useState<TransferRoomStatus | null>(null);
   const [p2pReceivedPhotos, setP2pReceivedPhotos] = useState<ReceivedPcPhoto[]>([]);
+  const [p2pFolderPaths, setP2pFolderPaths] = useState<string[]>([]);
   const [p2pSaved, setP2pSaved] = useState(false);
   const p2pSessionRef = useRef<P2PReceiverSession | null>(null);
 
@@ -230,9 +236,18 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
         useHttp = false;
       }
 
+      const folderPaths = await getAllUserFolderPaths(photos);
       const sentIds: string[] = [];
 
       if (useHttp) {
+        if (folderPaths.length > 0) {
+          await fetch(`./api/transfer/${cleanCode}/folders`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folderPaths }),
+          }).catch(() => {});
+        }
+
         for (let i = 0; i < photos.length; i++) {
           const photo = photos[i];
           const res = await fetch(`./api/transfer/${cleanCode}/upload`, {
@@ -265,13 +280,14 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
         await sendPhotosViaP2P(
           cleanCode,
           photos,
+          folderPaths,
           (sent, total) => setSendProgress({ sent, total }),
           async () => {
             alreadyConfirmed = true;
             await onConfirmPcAck(idsToSend, autoDeleteAfterPc);
             setPhoneTransferMsg(
               autoDeleteAfterPc
-                ? `Transfert confirmé par le PC : ${idsToSend.length} photo(s) supprimée(s) automatiquement.`
+                ? `Transfert confirmé par le PC : ${idsToSend.length} photo(s) supprimée(s), vos dossiers de chantier restent conservés.`
                 : 'Le PC a bien enregistré vos photos.'
             );
           }
@@ -306,22 +322,23 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
     setExportingZip(true);
     setPhoneTransferMsg(null);
     try {
-      const zipBlob = await buildPhotosZipBlob(photos);
+      const folderPaths = await getAllUserFolderPaths(photos);
+      const zipBlob = await buildPhotosZipBlob(photos, folderPaths);
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `Chantiers_${new Date().toISOString().slice(0, 10)}.zip`;
       a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
 
-      if (deleteAfterZip) {
+      if (deleteAfterZip && zipBlob.size > 0) {
         const ids = photos.map((p) => p.id);
         await onDeletePhotosBatch(ids);
         setPhoneTransferMsg(
-          `ZIP exporté et ${ids.length} photo(s) supprimée(s) de l’appli.`
+          `1 seul ZIP téléchargé avec tout le classement ! Les ${ids.length} photo(s) ont été supprimées et votre arborescence de dossiers reste intacte dans l’appli.`
         );
       } else {
-        setPhoneTransferMsg('Archive ZIP prête et téléchargée.');
+        setPhoneTransferMsg('Archive ZIP unique prête et téléchargée avec tout votre classement.');
       }
     } finally {
       setExportingZip(false);
@@ -332,6 +349,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
     setCreatingRoom(true);
     setPcError(null);
     setP2pReceivedPhotos([]);
+    setP2pFolderPaths([]);
     setP2pSaved(false);
     setPcRoomStatus(null);
     p2pSessionRef.current?.destroy();
@@ -356,6 +374,9 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
       onReady: (code) => {
         setPcCode(code);
         setCreatingRoom(false);
+      },
+      onFolderPathsReceived: (paths) => {
+        setP2pFolderPaths((prev) => Array.from(new Set([...prev, ...paths])));
       },
       onPhotoReceived: (photo) => {
         setP2pReceivedPhotos((prev) =>
@@ -394,13 +415,13 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
         folderId: '',
         folderPath: p.folderPath,
       }));
-      const zipBlob = await buildPhotosZipBlob(zipInput);
+      const zipBlob = await buildPhotosZipBlob(zipInput, p2pFolderPaths);
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `Chantiers_${new Date().toISOString().slice(0, 10)}.zip`;
       a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
 
       p2pSessionRef.current?.sendAck();
       setP2pSaved(true);
@@ -437,6 +458,19 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
     setPcError(null);
     try {
       const rootHandle = await picker({ mode: 'readwrite' });
+
+      const extraPaths =
+        pcTransport === 'p2p' ? p2pFolderPaths : pcRoomStatus?.folderPaths || [];
+      for (const folderPath of extraPaths) {
+        let dirHandle = rootHandle;
+        const segments = folderPath
+          .split('/')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        for (const seg of segments) {
+          dirHandle = await dirHandle.getDirectoryHandle(seg, { create: true });
+        }
+      }
 
       if (pcTransport === 'p2p') {
         for (let i = 0; i < p2pReceivedPhotos.length; i++) {
@@ -615,7 +649,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
                   className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
                 />
                 <span>
-                  Supprimer automatiquement les photos de l’appli dès que le PC les a enregistrées
+                  Supprimer automatiquement les photos après transfert PC (vos dossiers de chantier restent conservés)
                 </span>
               </label>
             </form>
@@ -635,14 +669,14 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
             )}
           </div>
 
-          {/* Card 2: Instant Local ZIP Export + Auto Cleanup */}
+          {/* Card 2: Instant 1-ZIP Export + Photo-Only Cleanup */}
           <div className="lg:col-span-5 rounded-2xl border border-slate-200 bg-white p-5 flex flex-col justify-between gap-4">
             <div className="space-y-2">
               <h2 className="text-base font-semibold text-slate-900">
-                2. Export ZIP classé (fonctionne hors-ligne)
+                2. Tout copier en 1 seul ZIP classé
               </h2>
               <p className="text-sm text-slate-600">
-                Génère une archive ZIP avec tous vos chantiers et sous-dossiers déjà rangés, puis nettoie l’appli.
+                Regroupe toutes vos photos dans un seul fichier ZIP avec votre arborescence exacte de chantiers et sous-dossiers, même hors-ligne.
               </p>
             </div>
 
@@ -654,7 +688,9 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
                   onChange={(e) => setDeleteAfterZip(e.target.checked)}
                   className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
                 />
-                <span>Supprimer de l’appli juste après l’export ZIP</span>
+                <span>
+                  Supprimer toutes les photos après création du ZIP (vos dossiers restent dans l’appli)
+                </span>
               </label>
 
               <button
@@ -668,7 +704,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
                 ) : (
                   <Archive className="w-4 h-4" />
                 )}
-                <span>Télécharger le ZIP classé ({photos.length})</span>
+                <span>Tout télécharger en 1 ZIP ({photos.length})</span>
               </button>
             </div>
           </div>

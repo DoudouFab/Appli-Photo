@@ -40,6 +40,10 @@ type P2PMessage =
       id: string;
     }
   | {
+      type: 'FOLDER_TREE';
+      paths: string[];
+    }
+  | {
       type: 'TRANSFER_SAVED_ON_PC';
     };
 
@@ -62,6 +66,7 @@ export interface P2PReceiverSession {
 
 export function startP2PReceiver(callbacks: {
   onReady: (code: string) => void;
+  onFolderPathsReceived?: (paths: string[]) => void;
   onPhotoReceived: (photo: ReceivedPcPhoto) => void;
   onError: (message: string) => void;
 }): P2PReceiverSession {
@@ -105,6 +110,10 @@ export function startP2PReceiver(callbacks: {
         const entry = incomingBuffers.get(msg.id);
         if (entry) {
           entry.chunks[msg.index] = msg.data;
+        }
+      } else if (msg.type === 'FOLDER_TREE') {
+        if (Array.isArray(msg.paths)) {
+          callbacks.onFolderPathsReceived?.(msg.paths);
         }
       } else if (msg.type === 'PHOTO_END') {
         const entry = incomingBuffers.get(msg.id);
@@ -169,6 +178,7 @@ async function waitForBufferDrain(conn: DataConnection): Promise<void> {
 export async function sendPhotosViaP2P(
   code: string,
   photos: QueuedPhoto[],
+  folderPaths: string[],
   onProgress: (sent: number, total: number) => void,
   onPcConfirmed: () => Promise<void> | void
 ): Promise<{ disconnect: () => void }> {
@@ -192,6 +202,13 @@ export async function sendPhotosViaP2P(
       conn.on('open', async () => {
         clearTimeout(timeout);
         try {
+          if (folderPaths.length > 0) {
+            conn.send({
+              type: 'FOLDER_TREE',
+              paths: folderPaths,
+            } satisfies P2PMessage);
+          }
+
           for (let i = 0; i < photos.length; i++) {
             const photo = photos[i];
             const buffer = await photo.blob.arrayBuffer();

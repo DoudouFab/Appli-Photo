@@ -80,13 +80,90 @@ export async function deletePhotosByIds(ids: string[]): Promise<void> {
   });
 }
 
-export async function buildPhotosZipBlob(photos: QueuedPhoto[]): Promise<Blob> {
+const DEFAULT_SEED_IDS = new Set([
+  'loc_chantier_1',
+  'loc_sub_1_1',
+  'loc_sub_1_2',
+  'loc_subsub_1_2_1',
+  'loc_subsub_1_2_2',
+  'loc_chantier_2',
+  'loc_sub_2_1',
+  'loc_sub_2_2',
+]);
+
+function sanitizeZipSegments(rawPath: string): string[] {
+  return rawPath
+    .split('/')
+    .map((s) => s.trim().replace(/[\\:*?"<>|]/g, '-'))
+    .filter((s) => s && s !== '.' && s !== '..' && s !== 'Mes chantiers' && s !== 'Chantiers locaux');
+}
+
+export async function getAllUserFolderPaths(photos: QueuedPhoto[] = []): Promise<string[]> {
+  const allFolders = await getAllLocalFolders();
+  const byId = new Map(allFolders.map((f) => [f.id, f]));
+  const photoFolderIds = new Set(photos.map((p) => p.folderId));
+
+  // Check if any default folder has user-created descendants or photos
+  const activeDefaultRoots = new Set<string>();
+  for (const f of allFolders) {
+    const isCustomOrHasPhoto = !DEFAULT_SEED_IDS.has(f.id) || photoFolderIds.has(f.id);
+    if (!isCustomOrHasPhoto) continue;
+    let curr: LocalFolderRecord | undefined = f;
+    const guard = new Set<string>();
+    while (curr && curr.parentId !== 'root' && !guard.has(curr.id)) {
+      guard.add(curr.id);
+      curr = byId.get(curr.parentId);
+    }
+    if (curr && DEFAULT_SEED_IDS.has(curr.id)) {
+      activeDefaultRoots.add(curr.id);
+    }
+  }
+
+  const paths: string[] = [];
+  for (const f of allFolders) {
+    const segments: string[] = [];
+    let curr: LocalFolderRecord | undefined = f;
+    const guard = new Set<string>();
+    let rootSeedId: string | null = null;
+    while (curr && !guard.has(curr.id)) {
+      guard.add(curr.id);
+      segments.unshift(curr.name);
+      if (curr.parentId === 'root') {
+        if (DEFAULT_SEED_IDS.has(curr.id)) rootSeedId = curr.id;
+        break;
+      }
+      curr = byId.get(curr.parentId);
+    }
+
+    // Skip untouched demo sample folders unless user took photos or added subfolders inside them
+    if (rootSeedId && !activeDefaultRoots.has(rootSeedId)) {
+      continue;
+    }
+
+    const clean = sanitizeZipSegments(segments.join('/'));
+    if (clean.length > 0) {
+      paths.push(clean.join('/'));
+    }
+  }
+
+  return Array.from(new Set(paths));
+}
+
+export async function buildPhotosZipBlob(
+  photos: QueuedPhoto[],
+  extraFolderPaths: string[] = []
+): Promise<Blob> {
   const zip = new JSZip();
+
+  for (const folderPath of extraFolderPaths) {
+    const cleanSegments = sanitizeZipSegments(folderPath);
+    if (cleanSegments.length > 0) {
+      zip.folder(cleanSegments.join('/'));
+    }
+  }
+
   for (const photo of photos) {
-    const cleanSegments = photo.folderPath
-      .split('/')
-      .map((s) => s.trim().replace(/[\\:*?"<>|]/g, '-'))
-      .filter((s) => s && s !== 'Mes chantiers' && s !== 'Chantiers locaux');
+    const cleanSegments = sanitizeZipSegments(photo.folderPath);
     const pathPrefix = cleanSegments.length > 0 ? cleanSegments.join('/') : 'Chantier';
     zip.file(`${pathPrefix}/${photo.filename}`, photo.blob, { compression: 'STORE' });
   }

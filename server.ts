@@ -26,6 +26,7 @@ interface TransferRoom {
   createdAt: number;
   expiresAt: number;
   received: boolean;
+  folderPaths: string[];
   photos: TransferPhoto[];
 }
 
@@ -80,10 +81,26 @@ async function startServer() {
       createdAt: now,
       expiresAt: now + 30 * 60_000,
       received: false,
+      folderPaths: [],
       photos: [],
     };
     transferRooms.set(code, room);
     return res.status(201).json({ code, expiresAt: room.expiresAt });
+  });
+
+  app.post('/api/transfer/:code/folders', (req: Request, res: Response) => {
+    pruneTransferRooms();
+    const code = String(req.params.code || '').replace(/\D/g, '');
+    const room = transferRooms.get(code);
+    if (!room) {
+      return res.status(404).json({ error: 'SESSION_NOT_FOUND' });
+    }
+    const rawPaths = Array.isArray(req.body?.folderPaths) ? req.body.folderPaths : [];
+    const cleaned = rawPaths
+      .map((p: unknown) => sanitizePathSegments(String(p || '')).join('/'))
+      .filter((p: string) => p.length > 0);
+    room.folderPaths = Array.from(new Set([...room.folderPaths, ...cleaned]));
+    return res.json({ ok: true, count: room.folderPaths.length });
   });
 
   app.get('/api/transfer/:code/status', (req: Request, res: Response) => {
@@ -100,6 +117,7 @@ async function startServer() {
       received: room.received,
       photoCount: room.photos.length,
       totalBytes,
+      folderPaths: room.folderPaths,
       items: room.photos.map((p) => ({
         id: p.id,
         filename: p.filename,
@@ -171,6 +189,12 @@ async function startServer() {
     if (room.photos.length === 0) return res.status(400).json({ error: 'NO_PHOTOS' });
 
     const zip = new JSZip();
+    for (const folderPath of room.folderPaths) {
+      const segments = sanitizePathSegments(folderPath);
+      if (segments.length > 0) {
+        zip.folder(segments.join('/'));
+      }
+    }
     for (const photo of room.photos) {
       const segments = sanitizePathSegments(photo.folderPath);
       const zipPath = [...segments, photo.filename].join('/');
