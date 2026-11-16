@@ -8,6 +8,7 @@ import {
   Layers,
   Loader2,
   Send,
+  Share2,
   Smartphone,
   Trash2,
 } from 'lucide-react';
@@ -19,11 +20,16 @@ import {
   getFolderPathsFromList,
 } from '../lib/storage';
 import {
+  sharePhotosNativeOrDownload,
+  shareZipNativeOrDownload,
+} from '../lib/share';
+import {
   P2PReceiverSession,
   ReceivedPcPhoto,
   sendPhotosViaP2P,
   startP2PReceiver,
 } from '../lib/p2pTransfer';
+import { PhotoViewerModal } from './PhotoViewerModal';
 
 interface FileSystemWritableLike {
   write: (data: Blob) => Promise<void>;
@@ -87,6 +93,7 @@ interface UploadQueueProps {
   onConfirmPcAck: (sentIds: string[], autoDelete: boolean) => Promise<void>;
   onDeletePhoto: (id: string) => Promise<void>;
   onDeletePhotosBatch: (ids: string[]) => Promise<void>;
+  onFeedback?: (message: string) => void;
 }
 
 const PhotoThumbnail: React.FC<{ blob: Blob; alt: string }> = ({ blob, alt }) => {
@@ -123,6 +130,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
   onConfirmPcAck,
   onDeletePhoto,
   onDeletePhotosBatch,
+  onFeedback,
 }) => {
   const [roleMode, setRoleMode] = useState<'phone' | 'pc'>(() =>
     photos.length > 0 ? 'phone' : 'pc'
@@ -142,8 +150,10 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
 
   // Phone Local ZIP State
   const [exportingZip, setExportingZip] = useState(false);
+  const [sharingZip, setSharingZip] = useState(false);
   const [deleteAfterZip, setDeleteAfterZip] = useState(true);
   const [confirmEmptyPhotos, setConfirmEmptyPhotos] = useState(false);
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
 
   // PC Receiver State (supports both HTTP Relay and WebRTC P2P for GitHub Pages)
   const [pcTransport, setPcTransport] = useState<'http' | 'p2p' | null>(null);
@@ -405,6 +415,33 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
     }
   };
 
+  const handleShareZipMobile = async () => {
+    if (scopedPhotos.length === 0) return;
+    setSharingZip(true);
+    setPhoneTransferMsg(null);
+    try {
+      const zipBlob = await buildPhotosZipBlob(scopedPhotos, scopedFolderPaths);
+      const safeSlug =
+        isChantierScoped && selectedChantier
+          ? selectedChantier.name
+              .trim()
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .replace(/[^a-zA-Z0-9_-]+/g, '_')
+              .replace(/^_+|_+$/g, '') || 'Chantier'
+          : 'Chantiers';
+      const zipName = `${safeSlug}_${new Date().toISOString().slice(0, 10)}.zip`;
+      const outcome = await shareZipNativeOrDownload(zipBlob, zipName, scopeLabel);
+      if (outcome.status === 'fallback_downloaded') {
+        setPhoneTransferMsg(
+          `ZIP téléchargé (${scopeLabel}) — le menu partage direct (WhatsApp / Messenger / Outlook) s’ouvre automatiquement sur smartphone.`
+        );
+      }
+    } finally {
+      setSharingZip(false);
+    }
+  };
+
   const handleCreatePcCode = async () => {
     setCreatingRoom(true);
     setPcError(null);
@@ -608,33 +645,37 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
   };
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 py-4 sm:py-5 space-y-6">
+    <div className="mx-auto w-full max-w-6xl px-3 sm:px-6 py-3 sm:py-5 space-y-4 sm:space-y-6 overflow-x-clip">
       {/* Mode Selector: Phone (Sender) vs Work PC (Receiver) */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-200/70">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
+        <div className="grid grid-cols-2 w-full sm:w-auto sm:inline-flex items-center gap-1 p-1 rounded-xl bg-slate-200/70">
           <button
             type="button"
             onClick={() => setRoleMode('phone')}
-            className={`min-h-[42px] px-4 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-2 transition-colors whitespace-nowrap cursor-pointer ${
+            className={`min-h-[42px] px-2.5 sm:px-4 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 sm:gap-2 transition-colors min-w-0 cursor-pointer ${
               roleMode === 'phone'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Smartphone className="w-4 h-4 text-amber-600" />
-            <span>Envoyer depuis ce téléphone</span>
+            <Smartphone className="w-4 h-4 text-amber-600 shrink-0" />
+            <span className="truncate">
+              Envoyer<span className="hidden sm:inline"> depuis ce téléphone</span>
+            </span>
           </button>
           <button
             type="button"
             onClick={() => setRoleMode('pc')}
-            className={`min-h-[42px] px-4 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-2 transition-colors whitespace-nowrap cursor-pointer ${
+            className={`min-h-[42px] px-2.5 sm:px-4 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 sm:gap-2 transition-colors min-w-0 cursor-pointer ${
               roleMode === 'pc'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Laptop className="w-4 h-4 text-sky-600" />
-            <span>Récupérer sur mon PC boulot</span>
+            <Laptop className="w-4 h-4 text-sky-600 shrink-0" />
+            <span className="truncate">
+              Récupérer<span className="hidden sm:inline"> sur mon PC boulot</span>
+            </span>
           </button>
         </div>
 
@@ -657,45 +698,45 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
       {roleMode === 'phone' && (
         <div className="space-y-4">
           {selectedChantier && (
-            <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="text-xs text-slate-600">
-                Périmètre sélectionné : <strong className="text-slate-900">{scopeLabel}</strong>{' '}
+            <div className="rounded-2xl border border-slate-200 bg-white p-3.5 sm:px-4 sm:py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3">
+              <div className="text-xs text-slate-600 min-w-0">
+                Périmètre : <strong className="text-slate-900">{scopeLabel}</strong>{' '}
                 <span className="tabular-nums text-slate-500">
                   ({scopedPhotos.length} photo{scopedPhotos.length > 1 ? 's' : ''} · {formatBytes(scopedBytes)})
                 </span>
               </div>
-              <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100">
+              <div className="grid grid-cols-2 w-full sm:w-auto sm:inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100">
                 <button
                   type="button"
                   onClick={() => onChangeTransferScope('all')}
-                  className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  className={`min-h-[36px] px-2.5 sm:px-3 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-w-0 cursor-pointer transition-colors ${
                     !isChantierScoped
                       ? 'bg-slate-900 text-white'
                       : 'text-slate-700 hover:text-slate-950'
                   }`}
                 >
-                  <Layers className="w-3.5 h-3.5" />
-                  <span>Tous les chantiers ({photos.length})</span>
+                  <Layers className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Tous ({photos.length})</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => onChangeTransferScope('chantier')}
-                  className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  className={`min-h-[36px] px-2.5 sm:px-3 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1 min-w-0 cursor-pointer transition-colors ${
                     isChantierScoped
                       ? 'bg-amber-500 text-slate-950'
                       : 'text-slate-700 hover:text-slate-950'
                   }`}
                 >
-                  <span className="max-w-[140px] truncate">{selectedChantier.name}</span>
-                  <span className="tabular-nums">({selectedChantierPhotosCount})</span>
+                  <span className="truncate">{selectedChantier.name}</span>
+                  <span className="tabular-nums shrink-0">({selectedChantierPhotosCount})</span>
                 </button>
               </div>
             </div>
           )}
 
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 items-stretch">
             {/* Card 1: Direct Send to Work PC via 6-digit code */}
-            <div className="lg:col-span-7 rounded-2xl border border-slate-200 bg-white p-5 flex flex-col justify-between gap-4">
+            <div className="lg:col-span-7 min-w-0 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 flex flex-col justify-between gap-4">
               <div className="space-y-2">
                 <h2 className="text-base font-semibold text-slate-900">
                   1. Envoyer vers votre PC boulot ({scopeLabel})
@@ -714,7 +755,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
                     value={targetCode}
                     onChange={(e) => setTargetCode(e.target.value.replace(/\D/g, ''))}
                     placeholder="Code à 6 chiffres (ex: 482915)"
-                    className="flex-1 min-h-[48px] px-4 rounded-xl border border-slate-300 text-base font-mono tracking-widest text-slate-900 placeholder:text-slate-400 placeholder:tracking-normal placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    className="flex-1 min-w-0 w-full min-h-[48px] px-4 rounded-xl border border-slate-300 text-base font-mono tracking-widest text-slate-900 placeholder:text-slate-400 placeholder:tracking-normal placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-amber-500"
                   />
                   <button
                     type="submit"
@@ -768,7 +809,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
             </div>
 
             {/* Card 2: Instant 1-ZIP Export + Photo-Only Cleanup */}
-            <div className="lg:col-span-5 rounded-2xl border border-slate-200 bg-white p-5 flex flex-col justify-between gap-4">
+            <div className="lg:col-span-5 min-w-0 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 flex flex-col justify-between gap-4">
               <div className="space-y-2">
                 <h2 className="text-base font-semibold text-slate-900">
                   2. Tout copier en 1 seul ZIP classé
@@ -794,7 +835,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
                 <button
                   type="button"
                   onClick={handleLocalZipExport}
-                  disabled={exportingZip || scopedPhotos.length === 0}
+                  disabled={exportingZip || sharingZip || scopedPhotos.length === 0}
                   className="w-full min-h-[48px] px-4 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 disabled:opacity-50 inline-flex items-center justify-center gap-2 cursor-pointer"
                 >
                   {exportingZip ? (
@@ -808,6 +849,20 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
                       : `Tout télécharger en 1 ZIP (${scopedPhotos.length})`}
                   </span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={handleShareZipMobile}
+                  disabled={exportingZip || sharingZip || scopedPhotos.length === 0}
+                  className="w-full min-h-[44px] px-4 rounded-xl border border-slate-300 bg-white text-slate-900 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50 inline-flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {sharingZip ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-amber-600" />
+                  ) : (
+                    <Share2 className="w-4 h-4 text-amber-600" />
+                  )}
+                  <span>Partager le ZIP (WhatsApp · Messenger · Outlook)</span>
+                </button>
               </div>
             </div>
           </div>
@@ -816,7 +871,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
 
       {/* WORK PC RECEIVER VIEW */}
       {roleMode === 'pc' && (
-        <div className="rounded-2xl border border-slate-200 bg-white p-6 space-y-5">
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 space-y-5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h2 className="text-lg font-semibold text-slate-900">
@@ -940,15 +995,15 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
 
       {/* Stored Photos List (filtered by scope) */}
       <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-4">
-          <h2 className="text-sm font-semibold text-slate-900">
+        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-slate-900 truncate min-w-0">
             Photos ({scopeLabel})
           </h2>
           {scopedPhotos.length > 0 && (
             <button
               type="button"
               onClick={() => setConfirmEmptyPhotos((v) => !v)}
-              className="text-xs font-medium text-red-600 hover:underline cursor-pointer"
+              className="text-xs font-medium text-red-600 hover:underline shrink-0 cursor-pointer"
             >
               Tout vider ({scopedPhotos.length})
             </button>
@@ -989,15 +1044,19 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
           </div>
         ) : (
           <ul className="divide-y divide-slate-100">
-            {scopedPhotos.map((photo) => (
+            {scopedPhotos.map((photo, idx) => (
               <li
                 key={photo.id}
-                className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                className="p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4"
               >
-                <div className="flex items-center gap-3.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setViewerIndex(idx)}
+                  className="flex items-center gap-3.5 min-w-0 text-left cursor-pointer group"
+                >
                   <PhotoThumbnail blob={photo.blob} alt={photo.filename} />
                   <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-mono font-medium text-slate-900 truncate">
+                    <div className="text-sm font-mono font-medium text-slate-900 truncate group-hover:underline">
                       {photo.filename}
                     </div>
                     <div className="text-xs text-slate-600 truncate">
@@ -1014,9 +1073,29 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
                       </span>
                     </div>
                   </div>
-                </div>
+                </button>
 
                 <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const res = await sharePhotosNativeOrDownload(
+                        [photo],
+                        photo.folderPath
+                      );
+                      if (res.status === 'fallback_downloaded') {
+                        onFeedback?.(
+                          'Photo téléchargée — partage direct WhatsApp/Messenger/Outlook actif sur smartphone.'
+                        );
+                      }
+                    }}
+                    aria-label="Partager la photo (WhatsApp, Messenger, Outlook)"
+                    title="Partager vers WhatsApp, Messenger, Outlook"
+                    className="min-h-[40px] px-2.5 flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white text-slate-800 text-xs font-semibold hover:bg-slate-50 cursor-pointer"
+                  >
+                    <Share2 className="w-4 h-4 text-amber-600" />
+                    <span>Partager</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => handleDownloadSingle(photo)}
@@ -1039,6 +1118,16 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
           </ul>
         )}
       </div>
+
+      {viewerIndex !== null && scopedPhotos.length > 0 && (
+        <PhotoViewerModal
+          photos={scopedPhotos}
+          initialIndex={viewerIndex}
+          onClose={() => setViewerIndex(null)}
+          onDeletePhoto={onDeletePhoto}
+          onFeedback={onFeedback}
+        />
+      )}
     </div>
   );
 };

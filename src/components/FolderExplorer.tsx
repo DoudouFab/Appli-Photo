@@ -2,12 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight,
   Camera,
+  Check,
   ChevronRight,
   Folder,
   FolderPlus,
   ImagePlus,
   Layers,
   Loader2,
+  Share2,
   Trash2,
 } from 'lucide-react';
 import {
@@ -20,8 +22,79 @@ import {
   createLocalFolder,
   deleteAllLocalFolders,
   deleteLocalFolderRecursive,
+  formatBytes,
   getDescendantIdsFromList,
 } from '../lib/storage';
+import { sharePhotosNativeOrDownload } from '../lib/share';
+import { PhotoViewerModal } from './PhotoViewerModal';
+
+interface FolderPhotoTileProps {
+  photo: QueuedPhoto;
+  showFolderHint: boolean;
+  selectionMode: boolean;
+  isSelected: boolean;
+  onClick: () => void;
+}
+
+const FolderPhotoTile: React.FC<FolderPhotoTileProps> = ({
+  photo,
+  showFolderHint,
+  selectionMode,
+  isSelected,
+  onClick,
+}) => {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const objectUrl = URL.createObjectURL(photo.blob);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [photo.blob]);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group relative aspect-square w-full rounded-xl overflow-hidden bg-slate-200 border text-left cursor-pointer transition-transform active:scale-[0.98] ${
+        isSelected
+          ? 'border-amber-500 ring-2 ring-amber-500'
+          : 'border-slate-300 hover:border-slate-400'
+      }`}
+    >
+      {url && (
+        <img
+          src={url}
+          alt={photo.filename}
+          loading="lazy"
+          className="w-full h-full object-cover"
+        />
+      )}
+
+      {selectionMode && (
+        <span
+          className={`absolute top-1.5 right-1.5 w-6 h-6 rounded-full border flex items-center justify-center ${
+            isSelected
+              ? 'bg-amber-500 border-amber-600 text-slate-950'
+              : 'bg-slate-950/60 border-white/70 text-transparent'
+          }`}
+        >
+          <Check className="w-3.5 h-3.5 stroke-[3]" />
+        </span>
+      )}
+
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/85 via-slate-950/40 to-transparent px-2 pt-4 pb-1.5">
+        <div className="text-[10px] font-medium text-white truncate tabular-nums">
+          {showFolderHint
+            ? photo.folderPath
+            : new Date(photo.capturedAt).toLocaleTimeString('fr-FR', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+        </div>
+      </div>
+    </button>
+  );
+};
 
 interface FolderExplorerProps {
   allFolders: LocalFolderRecord[];
@@ -32,10 +105,13 @@ interface FolderExplorerProps {
   photos: QueuedPhoto[];
   onSelectTarget: (target: TargetFolder, launchCamera?: boolean) => void;
   onImportGalleryFiles: (target: TargetFolder, files: File[]) => Promise<void>;
+  onDeletePhoto: (id: string) => Promise<void>;
+  onDeletePhotosBatch: (ids: string[]) => Promise<void>;
   onFoldersChanged: () => Promise<void>;
   onFoldersDeleted: (deletedIds: Set<string> | 'ALL', alsoDeletePhotos: boolean) => Promise<void>;
   onOpenCreateChantier: () => void;
   onOpenTransfer: (scope: 'all' | 'chantier') => void;
+  onFeedback?: (message: string) => void;
 }
 
 export const FolderExplorer: React.FC<FolderExplorerProps> = ({
@@ -47,13 +123,22 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
   photos,
   onSelectTarget,
   onImportGalleryFiles,
+  onDeletePhoto,
+  onDeletePhotosBatch,
   onFoldersChanged,
   onFoldersDeleted,
   onOpenCreateChantier,
   onOpenTransfer,
+  onFeedback,
 }) => {
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const [importingGallery, setImportingGallery] = useState(false);
+  const [photoScopeMode, setPhotoScopeMode] = useState<'auto' | 'here' | 'tree'>('auto');
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
+  const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
+  const [sharingSelection, setSharingSelection] = useState(false);
 
   const [breadcrumbs, setBreadcrumbs] = useState<BreadcrumbSegment[]>(() =>
     selectedChantier
@@ -81,6 +166,11 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
     setConfirmDeleteChantier(false);
     setConfirmDeleteAll(false);
     setDeleteAllChecked(false);
+    setSelectionMode(false);
+    setSelectedPhotoIds(new Set());
+    setConfirmDeleteSelected(false);
+    setViewerIndex(null);
+    setPhotoScopeMode('auto');
     if (selectedChantier) {
       setBreadcrumbs([
         { id: 'root', name: 'Mes chantiers' },
@@ -115,6 +205,10 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
     setBreadcrumbs((prev) => [...prev, { id: folder.id, name: folder.name }]);
     setCreatingFolder(false);
     setConfirmDeleteFolderId(null);
+    setSelectionMode(false);
+    setSelectedPhotoIds(new Set());
+    setConfirmDeleteSelected(false);
+    setPhotoScopeMode('auto');
   };
 
   const jumpToBreadcrumb = (visibleIdx: number) => {
@@ -122,6 +216,10 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
     setBreadcrumbs((prev) => prev.slice(0, visibleIdx + 2));
     setCreatingFolder(false);
     setConfirmDeleteFolderId(null);
+    setSelectionMode(false);
+    setSelectedPhotoIds(new Set());
+    setConfirmDeleteSelected(false);
+    setPhotoScopeMode('auto');
   };
 
   const currentAsTarget: TargetFolder | null = selectedChantier
@@ -194,6 +292,57 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
   const selectedChantierSubfolderCount = selectedChantier
     ? getDescendantIdsFromList(allFolders, selectedChantier.id).size - 1
     : 0;
+
+  const directFolderPhotos = useMemo(
+    () =>
+      selectedChantier
+        ? photos.filter((p) => p.folderId === currentFolder.id)
+        : [],
+    [photos, selectedChantier, currentFolder.id]
+  );
+
+  const treeFolderPhotos = useMemo(() => {
+    if (!selectedChantier) return [];
+    const ids = getDescendantIdsFromList(allFolders, currentFolder.id);
+    return photos.filter((p) => ids.has(p.folderId));
+  }, [allFolders, photos, selectedChantier, currentFolder.id]);
+
+  const effectivePhotoScope: 'here' | 'tree' =
+    photoScopeMode === 'auto'
+      ? directFolderPhotos.length > 0 || treeFolderPhotos.length === 0
+        ? 'here'
+        : 'tree'
+      : photoScopeMode;
+
+  const displayedPhotos =
+    effectivePhotoScope === 'tree' ? treeFolderPhotos : directFolderPhotos;
+
+  const toggleSelectPhoto = (id: string) => {
+    setSelectedPhotoIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleSharePhotos = async (targetPhotos: QueuedPhoto[]) => {
+    if (targetPhotos.length === 0) return;
+    setSharingSelection(true);
+    try {
+      const outcome = await sharePhotosNativeOrDownload(
+        targetPhotos,
+        currentFolder.name
+      );
+      if (outcome.status === 'fallback_downloaded') {
+        onFeedback?.(
+          `${outcome.count} photo(s) téléchargée(s) — le partage direct WhatsApp/Messenger/Outlook s’ouvre sur smartphone.`
+        );
+      }
+    } finally {
+      setSharingSelection(false);
+    }
+  };
 
   // Empty state when no Chantier tabs exist yet
   if (!selectedChantier) {
@@ -276,32 +425,46 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 py-4 sm:py-5">
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+    <div className="mx-auto w-full max-w-6xl px-3 sm:px-6 py-3 sm:py-5 overflow-x-clip">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-6 items-start">
         {/* Main Subfolder Browser Column for the Active Chantier Tab */}
-        <div className="lg:col-span-8 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h1 className="text-lg font-semibold text-slate-900">
+        <div className="lg:col-span-8 space-y-3.5 sm:space-y-4 min-w-0">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 min-w-0">
+            <div className="min-w-0">
+              <h1 className="text-lg font-semibold text-slate-950 truncate">
                 {selectedChantier.name}
               </h1>
-              <p className="text-xs text-slate-500 tabular-nums">
+              <p className="text-xs text-slate-600 tabular-nums">
                 {selectedChantierPhotoCount} photo{selectedChantierPhotoCount > 1 ? 's' : ''} au total dans ce chantier
                 {selectedChantierSubfolderCount > 0 &&
                   ` · ${selectedChantierSubfolderCount} sous-dossier${selectedChantierSubfolderCount > 1 ? 's' : ''}`}
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="w-full sm:w-auto flex flex-wrap items-center gap-2 min-w-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmDeleteAll(false);
+                  setDeleteAllChecked(false);
+                  setConfirmDeleteChantier(false);
+                  setCreatingFolder((v) => !v);
+                }}
+                className="min-h-[42px] px-3 py-2 rounded-xl border border-slate-300 bg-white text-slate-900 text-xs font-semibold hover:bg-slate-50 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <FolderPlus className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>Nouveau sous-dossier</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => {
                   setConfirmDeleteAll(false);
                   setConfirmDeleteChantier((v) => !v);
                 }}
-                className="min-h-[42px] px-3 py-2 rounded-xl border border-slate-200 bg-white text-red-600 text-xs font-semibold hover:bg-red-50 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="min-h-[42px] px-3 py-2 rounded-xl border border-slate-200 bg-white text-red-600 text-xs font-semibold hover:bg-red-50 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
               >
-                <Trash2 className="w-3.5 h-3.5" />
+                <Trash2 className="w-3.5 h-3.5 shrink-0" />
                 <span>Supprimer ce chantier</span>
               </button>
 
@@ -313,25 +476,11 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                     setDeleteAllChecked(false);
                     setConfirmDeleteAll((v) => !v);
                   }}
-                  className="min-h-[42px] px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 text-xs font-medium hover:text-red-600 hover:bg-red-50 transition-colors whitespace-nowrap cursor-pointer"
+                  className="min-h-[42px] px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-xs font-medium hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
                 >
                   Tout supprimer
                 </button>
               )}
-
-              <button
-                type="button"
-                onClick={() => {
-                  setConfirmDeleteAll(false);
-                  setDeleteAllChecked(false);
-                  setConfirmDeleteChantier(false);
-                  setCreatingFolder((v) => !v);
-                }}
-                className="min-h-[42px] px-3.5 py-2 rounded-xl border border-slate-300 bg-white text-slate-800 text-xs font-semibold hover:bg-slate-50 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <FolderPlus className="w-4 h-4 text-amber-600" />
-                <span>Nouveau sous-dossier</span>
-              </button>
             </div>
           </div>
 
@@ -437,9 +586,9 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                 type="text"
                 value={newFolderName}
                 onChange={(e) => setNewFolderName(e.target.value)}
-                placeholder={`Sous-dossier dans « ${currentFolder.name} » (ex: Cuisine, Électricité, Sous-sol...)`}
+                placeholder={`Sous-dossier dans « ${currentFolder.name} »...`}
                 autoFocus
-                className="flex-1 min-h-[44px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                className="flex-1 min-w-0 min-h-[44px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
               />
               <div className="flex items-center gap-2 shrink-0">
                 <button
@@ -471,18 +620,18 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
 
           {/* Subfolder List */}
           <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-4">
-              <div className="text-xs font-medium text-slate-500 tabular-nums">
+            <div className="px-3 sm:px-4 py-2.5 sm:py-3 border-b border-slate-100 flex items-center justify-between gap-2.5">
+              <div className="min-w-0 flex-1 text-xs font-medium text-slate-500 tabular-nums truncate">
                 {folders.length} sous-dossier{folders.length > 1 ? 's' : ''}
                 <span className="mx-1.5">·</span>
                 <span className="text-slate-700 font-semibold">
-                  {totalPhotosHere} photo{totalPhotosHere > 1 ? 's' : ''} dans « {currentFolder.name} »
+                  {totalPhotosHere} photo{totalPhotosHere > 1 ? 's' : ''}
                 </span>
               </div>
               <button
                 type="button"
                 onClick={() => handleSelectCurrent(true)}
-                className="min-h-[36px] px-3 rounded-lg bg-amber-500 text-slate-950 text-xs font-semibold hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                className="min-h-[36px] px-2.5 sm:px-3 rounded-lg bg-amber-500 text-slate-950 text-xs font-semibold hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Camera className="w-3.5 h-3.5" />
                 <span>Photographier ici</span>
@@ -528,24 +677,24 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                   return (
                     <li
                       key={folder.id}
-                      className={`px-3 sm:px-4 transition-colors ${
+                      className={`px-2.5 sm:px-4 min-w-0 transition-colors ${
                         isActive ? 'bg-amber-50/70' : 'hover:bg-slate-50'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2 min-h-[60px]">
+                      <div className="flex items-center justify-between gap-1.5 sm:gap-2 min-h-[56px] min-w-0">
                         <button
                           type="button"
                           onClick={() => enterFolder(folder)}
-                          className="flex-1 min-w-0 min-h-[56px] flex items-center gap-3 text-left cursor-pointer py-2"
+                          className="flex-1 min-w-0 min-h-[52px] flex items-center gap-2.5 sm:gap-3 text-left cursor-pointer py-1.5"
                         >
-                          <span className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
+                          <span className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
                             <Folder className="w-4 h-4 text-amber-600" />
                           </span>
                           <span className="min-w-0 flex-1">
                             <span className="block text-sm font-medium text-slate-900 truncate">
                               {folder.name}
                             </span>
-                            <span className="block text-xs text-slate-500 tabular-nums">
+                            <span className="block text-xs text-slate-500 tabular-nums truncate">
                               {queuedCount} photo{queuedCount > 1 ? 's' : ''}
                               {descendantCount > 0 &&
                                 ` · ${descendantCount} sous-dossier${descendantCount > 1 ? 's' : ''}`}
@@ -553,11 +702,11 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                           </span>
                         </button>
 
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex items-center gap-1 shrink-0">
                           <button
                             type="button"
                             onClick={() => handleSelectChild(folder, true)}
-                            className="min-h-[40px] px-3 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-900 hover:text-white hover:border-slate-900 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                            className="min-h-[38px] px-2.5 sm:px-3 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-900 hover:text-white hover:border-slate-900 transition-colors inline-flex items-center gap-1 whitespace-nowrap cursor-pointer"
                           >
                             <Camera className="w-3.5 h-3.5" />
                             <span>Photos</span>
@@ -570,7 +719,7 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                                 : handleDeleteFolder(folder.id)
                             }
                             aria-label={`Supprimer ${folder.name}`}
-                            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 cursor-pointer"
+                            className="min-h-[38px] min-w-[36px] flex items-center justify-center rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 cursor-pointer"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
@@ -578,7 +727,7 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                             type="button"
                             onClick={() => enterFolder(folder)}
                             aria-label={`Ouvrir ${folder.name}`}
-                            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+                            className="min-h-[38px] min-w-[34px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
                           >
                             <ChevronRight className="w-4 h-4" />
                           </button>
@@ -616,10 +765,189 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
               </ul>
             )}
           </div>
+
+          {/* Recorded Photos Browser for the Current Folder / Chantier */}
+          <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+            <div className="px-3 sm:px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-slate-950 truncate">
+                  Photos dans « {currentFolder.name} » ({displayedPhotos.length})
+                </h2>
+                {displayedPhotos.length > 0 && (
+                  <p className="text-[11px] text-slate-600 tabular-nums">
+                    Touchez une photo pour l’agrandir, la partager ou la supprimer ·{' '}
+                    {formatBytes(displayedPhotos.reduce((s, p) => s + p.size, 0))}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {treeFolderPhotos.length !== directFolderPhotos.length && (
+                  <div className="flex items-center p-0.5 rounded-lg bg-slate-100 text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPhotoScopeMode('here');
+                        setSelectedPhotoIds(new Set());
+                      }}
+                      className={`px-2 py-1 rounded-md cursor-pointer tabular-nums ${
+                        effectivePhotoScope === 'here'
+                          ? 'bg-white text-slate-950 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Ici ({directFolderPhotos.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPhotoScopeMode('tree');
+                        setSelectedPhotoIds(new Set());
+                      }}
+                      className={`px-2 py-1 rounded-md cursor-pointer tabular-nums ${
+                        effectivePhotoScope === 'tree'
+                          ? 'bg-white text-slate-950 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Tout ({treeFolderPhotos.length})
+                    </button>
+                  </div>
+                )}
+
+                {displayedPhotos.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectionMode((v) => !v);
+                      setSelectedPhotoIds(new Set());
+                      setConfirmDeleteSelected(false);
+                    }}
+                    className={`min-h-[36px] px-2.5 rounded-lg border text-xs font-semibold cursor-pointer ${
+                      selectionMode
+                        ? 'bg-slate-900 border-slate-900 text-white'
+                        : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-50'
+                    }`}
+                  >
+                    {selectionMode ? 'Terminer' : 'Sélectionner'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {selectionMode && displayedPhotos.length > 0 && (
+              <div className="px-3 sm:px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-800 tabular-nums">
+                  <span>{selectedPhotoIds.size} sélectionnée(s)</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedPhotoIds.size === displayedPhotos.length) {
+                        setSelectedPhotoIds(new Set());
+                      } else {
+                        setSelectedPhotoIds(new Set(displayedPhotos.map((p) => p.id)));
+                      }
+                    }}
+                    className="text-amber-700 hover:underline cursor-pointer"
+                  >
+                    {selectedPhotoIds.size === displayedPhotos.length
+                      ? 'Tout décocher'
+                      : 'Tout cocher'}
+                  </button>
+                </div>
+
+                {selectedPhotoIds.size > 0 && !confirmDeleteSelected && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={sharingSelection}
+                      onClick={() =>
+                        handleSharePhotos(
+                          displayedPhotos.filter((p) => selectedPhotoIds.has(p.id))
+                        )
+                      }
+                      className="min-h-[38px] px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      {sharingSelection ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Share2 className="w-3.5 h-3.5" />
+                      )}
+                      <span>Partager (WhatsApp / Outlook)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteSelected(true)}
+                      className="min-h-[38px] px-3 rounded-xl border border-red-200 bg-white text-red-600 hover:bg-red-50 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Supprimer ({selectedPhotoIds.size})</span>
+                    </button>
+                  </div>
+                )}
+
+                {confirmDeleteSelected && selectedPhotoIds.size > 0 && (
+                  <div className="w-full pt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-red-900">
+                    <span>
+                      Supprimer définitivement ces <strong>{selectedPhotoIds.size}</strong> photo(s) ?
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await onDeletePhotosBatch(Array.from(selectedPhotoIds));
+                          setSelectedPhotoIds(new Set());
+                          setConfirmDeleteSelected(false);
+                          setSelectionMode(false);
+                          onFeedback?.('Photos sélectionnées supprimées.');
+                        }}
+                        className="min-h-[34px] px-3 rounded-lg bg-red-600 text-white font-semibold hover:bg-red-700 cursor-pointer"
+                      >
+                        Oui, supprimer
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteSelected(false)}
+                        className="min-h-[34px] px-3 rounded-lg border border-red-200 bg-white text-slate-700 hover:bg-slate-50 cursor-pointer"
+                      >
+                        Annuler
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {displayedPhotos.length === 0 ? (
+              <div className="py-7 px-4 text-center text-xs text-slate-600">
+                Aucune photo enregistrée dans ce dossier pour le moment.
+              </div>
+            ) : (
+              <div className="p-2.5 sm:p-3 grid grid-cols-3 sm:grid-cols-4 gap-2 sm:gap-2.5">
+                {displayedPhotos.map((photo, idx) => (
+                  <FolderPhotoTile
+                    key={photo.id}
+                    photo={photo}
+                    showFolderHint={effectivePhotoScope === 'tree'}
+                    selectionMode={selectionMode}
+                    isSelected={selectedPhotoIds.has(photo.id)}
+                    onClick={() => {
+                      if (selectionMode) {
+                        toggleSelectPhoto(photo.id);
+                      } else {
+                        setViewerIndex(idx);
+                      }
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Right Sidebar */}
-        <aside className="lg:col-span-4 space-y-5">
+        <aside className="lg:col-span-4 space-y-4 sm:space-y-5 min-w-0">
           {/* Active Destination Card */}
           <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
             <div>
@@ -770,6 +1098,16 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
           )}
         </aside>
       </div>
+
+      {viewerIndex !== null && displayedPhotos.length > 0 && (
+        <PhotoViewerModal
+          photos={displayedPhotos}
+          initialIndex={viewerIndex}
+          onClose={() => setViewerIndex(null)}
+          onDeletePhoto={onDeletePhoto}
+          onFeedback={onFeedback}
+        />
+      )}
     </div>
   );
 };

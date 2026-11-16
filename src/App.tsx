@@ -3,6 +3,7 @@ import {
   Camera,
   FolderPlus,
   FolderTree,
+  Home,
   Layers,
   ListChecks,
   WifiOff,
@@ -31,17 +32,19 @@ import {
   savePhotoRecord,
 } from './lib/storage';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
+import { useStorageQuota } from './hooks/useStorageQuota';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { HomeDashboard } from './components/HomeDashboard';
 import { FolderExplorer } from './components/FolderExplorer';
 import { CameraViewfinder } from './components/CameraViewfinder';
 import { UploadQueue } from './components/UploadQueue';
 
-type ActiveTab = 'folders' | 'camera' | 'queue';
+type ActiveTab = 'home' | 'folders' | 'camera' | 'queue';
 
 export function App() {
   const isOnline = useOnlineStatus();
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>('folders');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [activeTarget, setActiveTarget] = useState<TargetFolder | null>(() =>
     loadActiveTarget()
   );
@@ -332,6 +335,44 @@ export function App() {
     [allFolders, photos]
   );
 
+  const storageQuota = useStorageQuota(photos);
+
+  const handleLaunchCameraForChantier = (chantierId?: string) => {
+    if (chantierId) {
+      const chantier = rootChantiers.find((c) => c.id === chantierId);
+      const alreadyInsideChantier = activeTarget?.pathSegments.some(
+        (s) => s.id === chantierId
+      );
+      if (chantier && !alreadyInsideChantier) {
+        const target: TargetFolder = {
+          id: chantier.id,
+          name: chantier.name,
+          pathSegments: [
+            { id: 'root', name: 'Mes chantiers' },
+            { id: chantier.id, name: chantier.name },
+          ],
+        };
+        setActiveTarget(target);
+        saveActiveTarget(target);
+        setRecentTargets(loadRecentTargets());
+      }
+      setSelectedChantierId(chantierId);
+    } else if (!activeTarget && selectedChantier) {
+      const target: TargetFolder = {
+        id: selectedChantier.id,
+        name: selectedChantier.name,
+        pathSegments: [
+          { id: 'root', name: 'Mes chantiers' },
+          { id: selectedChantier.id, name: selectedChantier.name },
+        ],
+      };
+      setActiveTarget(target);
+      saveActiveTarget(target);
+      setRecentTargets(loadRecentTargets());
+    }
+    setActiveTab('camera');
+  };
+
   const totalCount = photos.length;
 
   const sessionPhotosForActiveFolder = activeTarget
@@ -339,17 +380,17 @@ export function App() {
     : [];
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
+    <div className="min-h-[100dvh] w-full max-w-full overflow-x-clip flex flex-col bg-slate-100 text-slate-950">
       {/* Top Bar — 3-Zone Contract on Desktop, Compact 52px Header on Mobile */}
-      <header className="sticky top-0 z-30 h-[52px] md:h-16 bg-white/90 backdrop-blur-md border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 md:gap-8">
-        {/* Zone 1: Brand Title with refined architectural camera-folder emblem */}
+      <header className="sticky top-0 z-30 h-[52px] md:h-16 w-full bg-white/95 backdrop-blur-md border-b border-slate-300 px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 md:gap-8">
+        {/* Zone 1: Brand Title — clicking always opens Accueil */}
         <a
           href="./"
           onClick={(e) => {
             e.preventDefault();
-            setActiveTab('folders');
+            setActiveTab('home');
           }}
-          className="inline-flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display"
+          className="inline-flex items-center gap-2 text-base sm:text-lg font-bold tracking-tight text-slate-950 whitespace-nowrap min-w-0 font-display"
         >
           <svg
             viewBox="0 0 32 32"
@@ -371,14 +412,25 @@ export function App() {
         </a>
 
         {/* Zone 2: Desktop Navigation Links */}
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
+        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-700">
+          <button
+            type="button"
+            onClick={() => setActiveTab('home')}
+            className={`whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+              activeTab === 'home'
+                ? 'text-slate-950 font-semibold underline decoration-amber-500 decoration-2 underline-offset-8'
+                : 'hover:text-slate-950'
+            }`}
+          >
+            Accueil
+          </button>
           <button
             type="button"
             onClick={() => setActiveTab('folders')}
             className={`whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
               activeTab === 'folders'
                 ? 'text-slate-950 font-semibold underline decoration-amber-500 decoration-2 underline-offset-8'
-                : 'hover:text-slate-900'
+                : 'hover:text-slate-950'
             }`}
           >
             Dossiers
@@ -389,7 +441,7 @@ export function App() {
             className={`whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
               activeTab === 'camera'
                 ? 'text-slate-950 font-semibold underline decoration-amber-500 decoration-2 underline-offset-8'
-                : 'hover:text-slate-900'
+                : 'hover:text-slate-950'
             }`}
           >
             Appareil photo
@@ -400,7 +452,7 @@ export function App() {
             className={`whitespace-nowrap shrink-0 cursor-pointer transition-colors tabular-nums ${
               activeTab === 'queue'
                 ? 'text-slate-950 font-semibold underline decoration-amber-500 decoration-2 underline-offset-8'
-                : 'hover:text-slate-900'
+                : 'hover:text-slate-950'
             }`}
           >
             Transfert{totalCount > 0 ? ` (${totalCount})` : ''}
@@ -431,22 +483,22 @@ export function App() {
         </div>
       )}
 
-      {/* Chantier Tabs Bar — always visible except during Camera capture */}
+      {/* Chantier Tabs Bar — always visible except during Camera capture; only this bar scrolls horizontally */}
       {activeTab !== 'camera' && (
-        <div className="bg-white border-b border-slate-200">
-          <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 py-2 flex items-center gap-2 overflow-x-auto">
+        <div className="w-full max-w-full overflow-hidden bg-white border-b border-slate-200">
+          <div className="mx-auto w-full max-w-6xl px-3 sm:px-6 py-2 flex items-center gap-2 overflow-x-auto no-scrollbar touch-pan-x">
             {activeTab === 'queue' && rootChantiers.length > 0 && (
               <button
                 type="button"
                 onClick={() => setTransferScope('all')}
-                className={`min-h-[38px] px-3.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                className={`min-h-[38px] px-3 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                   transferScope === 'all'
                     ? 'bg-slate-900 text-white'
                     : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
                 <Layers className="w-3.5 h-3.5" />
-                <span>Tous les chantiers</span>
+                <span>Tous</span>
                 <span className="tabular-nums opacity-80">({totalCount})</span>
               </button>
             )}
@@ -456,7 +508,7 @@ export function App() {
               const isSelected =
                 activeTab === 'queue'
                   ? transferScope === 'chantier' && selectedChantier?.id === chantier.id
-                  : selectedChantier?.id === chantier.id;
+                  : activeTab === 'folders' && selectedChantier?.id === chantier.id;
 
               return (
                 <button
@@ -466,15 +518,17 @@ export function App() {
                     setSelectedChantierId(chantier.id);
                     if (activeTab === 'queue') {
                       setTransferScope('chantier');
+                    } else if (activeTab === 'home') {
+                      setActiveTab('folders');
                     }
                   }}
-                  className={`min-h-[38px] px-3.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                  className={`min-h-[38px] px-3 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                     isSelected
                       ? 'bg-amber-500 text-slate-950'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      : 'bg-slate-100 text-slate-800 hover:bg-slate-200'
                   }`}
                 >
-                  <span className="max-w-[160px] truncate">{chantier.name}</span>
+                  <span className="max-w-[140px] truncate">{chantier.name}</span>
                   <span className="tabular-nums opacity-80">({count})</span>
                 </button>
               );
@@ -493,7 +547,7 @@ export function App() {
           {creatingChantierTab && (
             <form
               onSubmit={handleCreateChantierTab}
-              className="mx-auto w-full max-w-6xl px-4 sm:px-6 pb-3 pt-1 flex flex-col sm:flex-row gap-2"
+              className="mx-auto w-full max-w-6xl px-3 sm:px-6 pb-3 pt-1 flex flex-col sm:flex-row gap-2"
             >
               <input
                 type="text"
@@ -501,7 +555,7 @@ export function App() {
                 onChange={(e) => setNewChantierName(e.target.value)}
                 placeholder="Nom du nouveau chantier (ex: Villa Martin, Résidence Parc)..."
                 autoFocus
-                className="flex-1 min-h-[42px] px-3.5 rounded-xl border border-slate-300 bg-slate-50 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                className="flex-1 min-w-0 min-h-[42px] px-3.5 rounded-xl border border-slate-300 bg-slate-50 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
               />
               <div className="flex items-center gap-2 shrink-0">
                 <button
@@ -528,8 +582,28 @@ export function App() {
       )}
 
       {/* Main Workspace */}
-      <main className="flex-1 flex flex-col">
-        <div className="flex-1">
+      <main className="flex-1 w-full max-w-full min-w-0 flex flex-col">
+        <div className="flex-1 w-full max-w-full min-w-0">
+          {activeTab === 'home' && (
+            <HomeDashboard
+              rootChantiers={rootChantiers}
+              allFolders={allFolders}
+              photos={photos}
+              storage={storageQuota}
+              onOpenChantierFolders={(chantierId) => {
+                setSelectedChantierId(chantierId);
+                setActiveTab('folders');
+              }}
+              onLaunchCameraForChantier={handleLaunchCameraForChantier}
+              onOpenTransfer={(scope, chantierId) => {
+                if (chantierId) setSelectedChantierId(chantierId);
+                setTransferScope(scope);
+                setActiveTab('queue');
+              }}
+              onOpenCreateChantier={() => setCreatingChantierTab(true)}
+            />
+          )}
+
           {activeTab === 'folders' && (
             <FolderExplorer
               allFolders={allFolders}
@@ -540,6 +614,8 @@ export function App() {
               photos={photos}
               onSelectTarget={handleSelectTarget}
               onImportGalleryFiles={handleImportGalleryFiles}
+              onDeletePhoto={handleDeletePhoto}
+              onDeletePhotosBatch={handleDeletePhotosBatch}
               onFoldersChanged={refreshFolders}
               onFoldersDeleted={handleFoldersDeleted}
               onOpenCreateChantier={() => setCreatingChantierTab(true)}
@@ -547,6 +623,7 @@ export function App() {
                 setTransferScope(scope);
                 setActiveTab('queue');
               }}
+              onFeedback={showToast}
             />
           )}
 
@@ -576,27 +653,41 @@ export function App() {
               onConfirmPcAck={handleConfirmPcAck}
               onDeletePhoto={handleDeletePhoto}
               onDeletePhotosBatch={handleDeletePhotosBatch}
+              onFeedback={showToast}
             />
           )}
         </div>
 
         {/* Quiet Signature Footer */}
-        <footer className="mx-auto w-full max-w-6xl px-4 sm:px-6 pt-2 pb-24 md:pb-6 text-center md:text-right text-xs text-slate-400">
+        <footer className="mx-auto w-full max-w-6xl px-4 sm:px-6 pt-2 pb-20 md:pb-6 text-center md:text-right text-xs text-slate-500">
           ChantierShot · F.Pirquin
         </footer>
       </main>
 
-      {/* Mobile Bottom Thumb-Zone Tab Bar (64px, within 15% combined sticky height cap) */}
+      {/* Mobile Bottom Thumb-Zone Tab Bar (56px, within 15% combined sticky height cap) */}
       <nav
         aria-label="Navigation principale mobile"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 pb-safe"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-300 pb-safe"
       >
-        <div className="grid grid-cols-3 h-16 items-center">
+        <div className="grid grid-cols-4 h-14 items-center">
+          <button
+            type="button"
+            onClick={() => setActiveTab('home')}
+            className={`h-full flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              activeTab === 'home' ? 'text-slate-950 font-bold' : 'text-slate-600'
+            }`}
+          >
+            <Home
+              className={`w-5 h-5 ${activeTab === 'home' ? 'text-amber-600' : ''}`}
+            />
+            <span className="text-[11px] font-medium tracking-tight">Accueil</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setActiveTab('folders')}
-            className={`h-full flex flex-col items-center justify-center gap-1 cursor-pointer ${
-              activeTab === 'folders' ? 'text-slate-950' : 'text-slate-500'
+            className={`h-full flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              activeTab === 'folders' ? 'text-slate-950 font-bold' : 'text-slate-600'
             }`}
           >
             <FolderTree
@@ -608,8 +699,8 @@ export function App() {
           <button
             type="button"
             onClick={() => setActiveTab('camera')}
-            className={`h-full flex flex-col items-center justify-center gap-1 cursor-pointer ${
-              activeTab === 'camera' ? 'text-slate-950' : 'text-slate-500'
+            className={`h-full flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              activeTab === 'camera' ? 'text-slate-950 font-bold' : 'text-slate-600'
             }`}
           >
             <Camera
@@ -621,8 +712,8 @@ export function App() {
           <button
             type="button"
             onClick={() => setActiveTab('queue')}
-            className={`h-full flex flex-col items-center justify-center gap-1 cursor-pointer ${
-              activeTab === 'queue' ? 'text-slate-950' : 'text-slate-500'
+            className={`h-full flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              activeTab === 'queue' ? 'text-slate-950 font-bold' : 'text-slate-600'
             }`}
           >
             <ListChecks

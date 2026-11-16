@@ -316,26 +316,26 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       : activeTarget.name;
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-3 sm:px-6 py-3 sm:py-5">
+    <div className="mx-auto w-full max-w-6xl px-3 sm:px-6 py-2.5 sm:py-5 overflow-x-clip">
       {/* Locked Destination Strip */}
-      <div className="mb-3 sm:mb-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 flex items-center justify-between gap-3">
+      <div className="mb-2.5 sm:mb-4 rounded-2xl border border-slate-200 bg-white px-3 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2.5">
         <div className="min-w-0">
-          <div className="text-xs text-slate-500">Classement direct dans</div>
-          <div className="text-sm font-semibold text-slate-900 truncate">{fullPath}</div>
+          <div className="text-[11px] sm:text-xs text-slate-500">Classement direct dans</div>
+          <div className="text-xs sm:text-sm font-semibold text-slate-900 truncate">{fullPath}</div>
         </div>
         <button
           type="button"
           onClick={onChangeFolder}
-          className="min-h-[40px] px-3.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 cursor-pointer"
+          className="min-h-[36px] sm:min-h-[40px] px-3 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 cursor-pointer"
         >
           Changer
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-5 items-start">
         {/* Viewfinder & Shutter Column */}
-        <div className="lg:col-span-8 space-y-3">
-          <div className="relative rounded-3xl overflow-hidden bg-slate-950 aspect-[3/4] sm:aspect-[4/3] lg:aspect-[16/10] border border-slate-800">
+        <div className="lg:col-span-8 space-y-2.5 sm:space-y-3 min-w-0">
+          <div className="relative rounded-2xl sm:rounded-3xl overflow-hidden bg-slate-950 aspect-square max-h-[52dvh] sm:max-h-none sm:aspect-[4/3] lg:aspect-[16/10] w-full border border-slate-800">
             <video
               ref={videoRef}
               playsInline
@@ -469,12 +469,12 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
             )}
 
             {/* Bottom Shutter Bar inside Viewfinder (Thumb-Zone) */}
-            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950/90 via-slate-950/55 to-transparent pt-8 pb-4 px-5 flex items-center justify-between gap-4">
+            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950/90 via-slate-950/55 to-transparent pt-6 pb-3 sm:pt-8 sm:pb-4 px-3.5 sm:px-5 flex items-center justify-between gap-3">
               {/* Left: Last Capture Thumbnail / Transfer shortcut */}
               <button
                 type="button"
                 onClick={onOpenTransfer}
-                className="w-12 h-12 rounded-xl overflow-hidden border-2 border-white/30 bg-slate-900 flex items-center justify-center shrink-0 cursor-pointer"
+                className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl overflow-hidden border-2 border-white/30 bg-slate-900 flex items-center justify-center shrink-0 cursor-pointer"
                 aria-label="Voir les photos capturées"
               >
                 {lastThumbUrl ? (
@@ -498,9 +498,9 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 }
                 disabled={capturing || Boolean(importingProgress)}
                 aria-label="Prendre une photo"
-                className="w-[72px] h-[72px] rounded-full border-4 border-white bg-amber-500 hover:bg-amber-400 active:scale-95 transition-transform flex items-center justify-center shadow-lg cursor-pointer disabled:opacity-60"
+                className="w-[66px] h-[66px] sm:w-[72px] sm:h-[72px] rounded-full border-4 border-white bg-amber-500 hover:bg-amber-400 active:scale-95 transition-transform flex items-center justify-center shadow-lg cursor-pointer disabled:opacity-60"
               >
-                <span className="w-[56px] h-[56px] rounded-full border-2 border-slate-950/20" />
+                <span className="w-[50px] h-[50px] sm:w-[56px] sm:h-[56px] rounded-full border-2 border-slate-950/20" />
               </button>
 
               {/* Right: Phone Gallery Multi-Import Button */}
@@ -508,7 +508,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 type="button"
                 onClick={() => galleryInputRef.current?.click()}
                 disabled={Boolean(importingProgress)}
-                className="min-h-[48px] px-3.5 rounded-xl bg-slate-900/85 border border-white/20 text-white text-xs font-semibold hover:bg-slate-800 inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-60"
+                className="min-h-[44px] sm:min-h-[48px] px-3 sm:px-3.5 rounded-xl bg-slate-900/85 border border-white/20 text-white text-xs font-semibold hover:bg-slate-800 inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-60"
                 title="Importer une ou plusieurs photos déjà présentes dans votre galerie téléphone"
               >
                 <ImagePlus className="w-4 h-4 text-amber-400" />
@@ -537,7 +537,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
         </div>
 
         {/* Right Controls & Live Burst Feed */}
-        <aside className="lg:col-span-4 space-y-4">
+        <aside className="lg:col-span-4 space-y-3 sm:space-y-4 min-w-0">
           {/* Quick Prefix & Stamp Options */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
             <div>
