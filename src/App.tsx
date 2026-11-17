@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import {
   Camera,
@@ -28,17 +28,23 @@ import {
   loadActiveTarget,
   loadCaptureSettings,
   loadRecentTargets,
+  movePhotosToFolder,
   normalizeBlobToMax15MP,
   removeDeletedFoldersFromTargets,
   saveActiveTarget,
   saveCaptureSettings,
   savePhotoRecord,
+  updateFolderNote,
+  updatePhotoNote,
 } from './lib/storage';
 import { auth } from './lib/firebase';
 import {
   AccessUserRecord,
   clearCachedApproval,
+  detectDeviceHint,
+  extractFirestoreErrorReason,
   isAdminEmail,
+  isOfflineFirestoreError,
   loadCachedApproval,
   refreshOwnDeviceMetadata,
   subscribeToAllAccessUsers,
@@ -65,6 +71,7 @@ export function App() {
   const [checkingAccess, setCheckingAccess] = useState(false);
   const [offlineBlockedMessage, setOfflineBlockedMessage] = useState<string | null>(null);
   const [pendingAccessCount, setPendingAccessCount] = useState(0);
+  const refreshedMetadataUidRef = useRef<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [activeTarget, setActiveTarget] = useState<TargetFolder | null>(() =>
@@ -190,7 +197,10 @@ export function App() {
 
   // Live Firestore authorization listener for signed-in user
   useEffect(() => {
-    if (!authUser) return;
+    if (!authUser) {
+      refreshedMetadataUidRef.current = null;
+      return;
+    }
     setCheckingAccess(true);
     setOfflineBlockedMessage(null);
 
@@ -200,18 +210,40 @@ export function App() {
         setAccessRecord(record);
         setCheckingAccess(false);
         setOfflineBlockedMessage(null);
-        if (record && navigator.onLine) {
-          void refreshOwnDeviceMetadata(authUser);
+        if (
+          record &&
+          navigator.onLine &&
+          refreshedMetadataUidRef.current !== authUser.uid
+        ) {
+          refreshedMetadataUidRef.current = authUser.uid;
+          const expectedName = (
+            authUser.displayName ||
+            authUser.email?.split('@')[0] ||
+            'Utilisateur'
+          )
+            .trim()
+            .slice(0, 120);
+          const expectedDevice = detectDeviceHint().slice(0, 120);
+          if (
+            record.displayName !== expectedName ||
+            record.deviceHint !== expectedDevice
+          ) {
+            void refreshOwnDeviceMetadata(authUser);
+          }
         }
       },
-      () => {
+      (err) => {
         setCheckingAccess(false);
         const cached = loadCachedApproval(authUser.uid);
         if (isAdminEmail(authUser.email, authUser.emailVerified) || cached?.status === 'approved') {
           setOfflineBlockedMessage(null);
-        } else {
+        } else if (isOfflineFirestoreError(err)) {
           setOfflineBlockedMessage(
             'Connectez-vous à internet pour vérifier votre autorisation initiale auprès de l’administrateur.'
+          );
+        } else {
+          setOfflineBlockedMessage(
+            `Impossible d’enregistrer votre demande (${extractFirestoreErrorReason(err)}). Appuyez sur Réessayer.`
           );
         }
       }
@@ -305,12 +337,13 @@ export function App() {
     saveCaptureSettings(next);
   };
 
-  const handlePhotoCaptured = async (blob: Blob, filename: string) => {
+  const handlePhotoCaptured = async (blob: Blob, filename: string, note?: string) => {
     if (!activeTarget) return;
     const pathLabel = activeTarget.pathSegments
       .filter((s) => s.id !== 'root')
       .map((s) => s.name)
       .join(' / ');
+    const cleanNote = note?.trim();
     const newPhoto: QueuedPhoto = {
       id: `ph_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       filename,
@@ -319,6 +352,7 @@ export function App() {
       capturedAt: Date.now(),
       folderId: activeTarget.id,
       folderPath: pathLabel || activeTarget.name,
+      ...(cleanNote ? { note: cleanNote } : {}),
     };
 
     await savePhotoRecord(newPhoto);
@@ -334,6 +368,52 @@ export function App() {
     await deletePhotosByIds(ids);
     const idSet = new Set(ids);
     setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)));
+  };
+
+  const handleMovePhotos = async (photoIds: string[], target: TargetFolder) => {
+    if (photoIds.length === 0) return;
+    const newFolderPath = await movePhotosToFolder(photoIds, target);
+    const idSet = new Set(photoIds);
+    setPhotos((prev) =>
+      prev.map((p) =>
+        idSet.has(p.id)
+          ? { ...p, folderId: target.id, folderPath: newFolderPath }
+          : p
+      )
+    );
+    showToast(
+      `${photoIds.length} photo${photoIds.length > 1 ? 's' : ''} déplacée${
+        photoIds.length > 1 ? 's' : ''
+      } vers « ${target.name} ».`
+    );
+  };
+
+  const handleUpdatePhotoNote = async (photoId: string, note: string) => {
+    const trimmed = note.trim().slice(0, 300);
+    await updatePhotoNote(photoId, trimmed);
+    setPhotos((prev) =>
+      prev.map((p) => {
+        if (p.id !== photoId) return p;
+        const next = { ...p };
+        if (trimmed) next.note = trimmed;
+        else delete next.note;
+        return next;
+      })
+    );
+  };
+
+  const handleUpdateFolderNote = async (folderId: string, note: string) => {
+    const trimmed = note.trim().slice(0, 600);
+    await updateFolderNote(folderId, trimmed);
+    setAllFolders((prev) =>
+      prev.map((f) => {
+        if (f.id !== folderId) return f;
+        const next = { ...f };
+        if (trimmed) next.note = trimmed;
+        else delete next.note;
+        return next;
+      })
+    );
   };
 
   const handleImportGalleryFiles = async (target: TargetFolder, files: File[]) => {
@@ -494,7 +574,10 @@ export function App() {
         accessRecord={accessRecord}
         checkingAccess={checkingAccess}
         offlineBlockedMessage={offlineBlockedMessage}
-        onManualAccessRefresh={(rec) => setAccessRecord(rec)}
+        onManualAccessRefresh={(rec) => {
+          setAccessRecord(rec);
+          setOfflineBlockedMessage(null);
+        }}
       />
     );
   }
@@ -766,6 +849,9 @@ export function App() {
               onImportGalleryFiles={handleImportGalleryFiles}
               onDeletePhoto={handleDeletePhoto}
               onDeletePhotosBatch={handleDeletePhotosBatch}
+              onMovePhotos={handleMovePhotos}
+              onUpdatePhotoNote={handleUpdatePhotoNote}
+              onUpdateFolderNote={handleUpdateFolderNote}
               onFoldersChanged={refreshFolders}
               onFoldersDeleted={handleFoldersDeleted}
               onOpenCreateChantier={() => setCreatingChantierTab(true)}
@@ -774,6 +860,7 @@ export function App() {
                 setActiveTab('queue');
               }}
               onFeedback={showToast}
+              isOnline={isOnline}
             />
           )}
 
@@ -803,12 +890,15 @@ export function App() {
               onConfirmPcAck={handleConfirmPcAck}
               onDeletePhoto={handleDeletePhoto}
               onDeletePhotosBatch={handleDeletePhotosBatch}
+              onMovePhotos={handleMovePhotos}
+              onUpdatePhotoNote={handleUpdatePhotoNote}
               onFeedback={showToast}
             />
           )}
 
           {activeTab === 'access' && isRootAdmin && authUser && (
             <AdminAccessPanel
+              adminUid={authUser.uid}
               currentEmail={authUser.email || ''}
               onSignOut={handleSignOut}
               onFeedback={showToast}

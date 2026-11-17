@@ -1,5 +1,5 @@
 import Peer, { DataConnection } from 'peerjs';
-import { QueuedPhoto } from '../types';
+import { PortableFolderBundle, QueuedPhoto } from '../types';
 
 const CHUNK_SIZE = 64 * 1024; // 64 KB safe WebRTC SCTP chunk size
 const PEER_PREFIX = 'chantiershot-fp-';
@@ -45,6 +45,14 @@ type P2PMessage =
     }
   | {
       type: 'TRANSFER_SAVED_ON_PC';
+    }
+  | {
+      type: 'FOLDER_BUNDLE';
+      bundle: PortableFolderBundle;
+    }
+  | {
+      type: 'FOLDER_BUNDLE_ACK';
+      createdCount: number;
     };
 
 export async function isHttpTransferAvailable(): Promise<boolean> {
@@ -284,6 +292,142 @@ export async function sendPhotosViaP2P(
           clearTimeout(timeout);
           peer.destroy();
           reject(new Error('Impossible de joindre ce code sur le PC.'));
+        }
+      });
+    });
+
+    peer.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        peer.destroy();
+        reject(new Error(err?.message || 'Erreur de connexion P2P.'));
+      }
+    });
+  });
+}
+
+export interface FolderReceiverSession {
+  code: string;
+  destroy: () => void;
+}
+
+export function startFolderBundleReceiverP2P(callbacks: {
+  onReady: (code: string) => void;
+  onBundleReceived: (bundle: PortableFolderBundle) => Promise<number>;
+  onError: (message: string) => void;
+}): FolderReceiverSession {
+  const randomCode = String(Math.floor(100000 + Math.random() * 900000));
+  const peer = new Peer(`${PEER_PREFIX}${randomCode}`, {
+    config: { iceServers: ICE_SERVERS },
+  });
+  const activeConnections = new Set<DataConnection>();
+
+  peer.on('open', () => {
+    callbacks.onReady(randomCode);
+  });
+
+  peer.on('connection', (conn) => {
+    activeConnections.add(conn);
+    conn.on('data', async (raw) => {
+      const msg = raw as P2PMessage;
+      if (msg?.type === 'FOLDER_BUNDLE' && msg.bundle) {
+        try {
+          const createdCount = await callbacks.onBundleReceived(msg.bundle);
+          if (conn.open) {
+            conn.send({
+              type: 'FOLDER_BUNDLE_ACK',
+              createdCount,
+            } satisfies P2PMessage);
+          }
+        } catch (err) {
+          callbacks.onError(
+            err instanceof Error
+              ? err.message
+              : 'Impossible d’enregistrer les dossiers reçus.'
+          );
+        }
+      }
+    });
+    conn.on('close', () => {
+      activeConnections.delete(conn);
+    });
+  });
+
+  peer.on('error', (err) => {
+    callbacks.onError(
+      err?.message?.includes('ID')
+        ? 'Collision de code temporaire, générez un nouveau code.'
+        : 'Connexion P2P interrompue. Vérifiez le réseau et réessayez.'
+    );
+  });
+
+  return {
+    code: randomCode,
+    destroy: () => {
+      for (const conn of activeConnections) {
+        try {
+          conn.close();
+        } catch {
+          // ignore
+        }
+      }
+      peer.destroy();
+    },
+  };
+}
+
+export async function sendFolderBundleViaP2P(
+  code: string,
+  bundle: PortableFolderBundle
+): Promise<{ createdCount: number }> {
+  const peer = new Peer({
+    config: { iceServers: ICE_SERVERS },
+  });
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        peer.destroy();
+        reject(
+          new Error('Délai dépassé : vérifiez que le code est bien affiché sur le téléphone.')
+        );
+      }
+    }, 15_000);
+
+    peer.on('open', () => {
+      const conn = peer.connect(`${PEER_PREFIX}${code}`, { reliable: true });
+
+      conn.on('open', () => {
+        conn.send({
+          type: 'FOLDER_BUNDLE',
+          bundle,
+        } satisfies P2PMessage);
+      });
+
+      conn.on('data', (raw) => {
+        const msg = raw as P2PMessage;
+        if (msg?.type === 'FOLDER_BUNDLE_ACK' && !settled) {
+          settled = true;
+          clearTimeout(timeout);
+          try {
+            conn.close();
+          } catch {
+            // ignore
+          }
+          peer.destroy();
+          resolve({ createdCount: msg.createdCount ?? 0 });
+        }
+      });
+
+      conn.on('error', () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          peer.destroy();
+          reject(new Error('Impossible de joindre ce code sur le téléphone.'));
         }
       });
     });

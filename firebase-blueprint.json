@@ -65,6 +65,50 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "PreauthorizedEmail": {
+      "title": "PreauthorizedEmail",
+      "description": "Adresse e-mail pré-autorisée par l'administrateur pour accès immédiat dès la première connexion",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Identifiant normalisé dérivé de l'adresse e-mail",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Adresse e-mail Google pré-autorisée",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "note": {
+          "type": "string",
+          "description": "Libellé ou équipe du collègue pré-autorisé",
+          "maxLength": 200
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "UID de l'administrateur ayant ajouté la pré-autorisation",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Horodatage serveur d'ajout"
+        }
+      },
+      "required": [
+        "id",
+        "email",
+        "createdBy",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -73,6 +117,12 @@
         "$ref": "#/entities/AccessUser"
       },
       "description": "Profils d'accès des utilisateurs et demandes d'autorisation approuvées ou révoquées uniquement par l'administrateur"
+    },
+    "/preauthorized_emails/{emailId}": {
+      "schema": {
+        "$ref": "#/entities/PreauthorizedEmail"
+      },
+      "description": "Liste blanche d'adresses e-mail pré-autorisées gérée exclusivement par l'administrateur"
     }
   }
 }

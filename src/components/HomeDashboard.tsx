@@ -5,6 +5,7 @@ import {
   Camera,
   CheckCircle2,
   ChevronRight,
+  Clock,
   FolderOpen,
   FolderPlus,
   HardDrive,
@@ -38,6 +39,20 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
 }) => {
   const totalPhotos = photos.length;
   const totalSubfolders = Math.max(0, allFolders.length - rootChantiers.length);
+
+  const backupReminder = useMemo(() => {
+    if (photos.length === 0) return null;
+    const oldest = photos.reduce(
+      (min, p) => (p.capturedAt < min ? p.capturedAt : min),
+      photos[0].capturedAt
+    );
+    const ageDays = Math.max(0, Math.floor((Date.now() - oldest) / 86_400_000));
+    const urgent = ageDays >= 2 || photos.length >= 15 || storage.usedPercent >= 70;
+    return {
+      ageDays,
+      urgent,
+    };
+  }, [photos, storage.usedPercent]);
 
   const chantierSummaries = useMemo(() => {
     return rootChantiers.map((chantier) => {
@@ -265,6 +280,47 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
           )}
         </section>
       </div>
+
+      {/* Visual Backup Reminder Before Browser Cache Purge */}
+      {backupReminder && (
+        <section
+          className={`rounded-2xl border p-3.5 sm:px-5 sm:py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+            backupReminder.urgent
+              ? 'border-amber-300 bg-amber-50 text-slate-950'
+              : 'border-slate-300 bg-white text-slate-900'
+          }`}
+        >
+          <div className="flex items-start gap-2.5 min-w-0">
+            {backupReminder.urgent ? (
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            ) : (
+              <Clock className="w-5 h-5 text-slate-600 shrink-0 mt-0.5" />
+            )}
+            <div className="min-w-0 space-y-0.5">
+              <div className="text-xs sm:text-sm font-bold text-slate-950">
+                {backupReminder.urgent
+                  ? `Pensez à sauvegarder vos ${totalPhotos} photo(s) en attente`
+                  : `${totalPhotos} photo(s) stockée(s) localement sur cet appareil`}
+              </div>
+              <p className="text-xs text-slate-700 leading-relaxed">
+                {backupReminder.ageDays >= 1
+                  ? `Plus ancienne prise il y a ${backupReminder.ageDays} jour${backupReminder.ageDays > 1 ? 's' : ''}. `
+                  : ''}
+                Les photos restent uniquement dans ce navigateur tant qu’elles ne sont pas exportées en ZIP ou transférées sur votre PC.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onOpenTransfer('all')}
+            className="min-h-[42px] px-3.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Archive className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Sauvegarder / ZIP</span>
+          </button>
+        </section>
+      )}
 
       {/* Chantiers Overview List */}
       <section className="space-y-3">

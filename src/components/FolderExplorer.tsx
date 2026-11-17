@@ -5,10 +5,13 @@ import {
   Check,
   ChevronRight,
   Folder,
+  FolderInput,
   FolderPlus,
+  FolderTree,
   ImagePlus,
   Layers,
   Loader2,
+  MessageSquareText,
   Share2,
   Trash2,
 } from 'lucide-react';
@@ -26,6 +29,8 @@ import {
   getDescendantIdsFromList,
 } from '../lib/storage';
 import { sharePhotosNativeOrDownload } from '../lib/share';
+import { FolderPrepModal } from './FolderPrepModal';
+import { MovePhotosModal } from './MovePhotosModal';
 import { PhotoViewerModal } from './PhotoViewerModal';
 
 interface FolderPhotoTileProps {
@@ -70,6 +75,15 @@ const FolderPhotoTile: React.FC<FolderPhotoTileProps> = ({
         />
       )}
 
+      {photo.note && (
+        <span
+          className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full bg-slate-950/75 text-amber-400 flex items-center justify-center"
+          title={photo.note}
+        >
+          <MessageSquareText className="w-3.5 h-3.5" />
+        </span>
+      )}
+
       {selectionMode && (
         <span
           className={`absolute top-1.5 right-1.5 w-6 h-6 rounded-full border flex items-center justify-center ${
@@ -107,11 +121,15 @@ interface FolderExplorerProps {
   onImportGalleryFiles: (target: TargetFolder, files: File[]) => Promise<void>;
   onDeletePhoto: (id: string) => Promise<void>;
   onDeletePhotosBatch: (ids: string[]) => Promise<void>;
+  onMovePhotos: (photoIds: string[], target: TargetFolder) => Promise<void>;
+  onUpdatePhotoNote: (photoId: string, note: string) => Promise<void>;
+  onUpdateFolderNote: (folderId: string, note: string) => Promise<void>;
   onFoldersChanged: () => Promise<void>;
   onFoldersDeleted: (deletedIds: Set<string> | 'ALL', alsoDeletePhotos: boolean) => Promise<void>;
   onOpenCreateChantier: () => void;
   onOpenTransfer: (scope: 'all' | 'chantier') => void;
   onFeedback?: (message: string) => void;
+  isOnline?: boolean;
 }
 
 export const FolderExplorer: React.FC<FolderExplorerProps> = ({
@@ -125,11 +143,15 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
   onImportGalleryFiles,
   onDeletePhoto,
   onDeletePhotosBatch,
+  onMovePhotos,
+  onUpdatePhotoNote,
+  onUpdateFolderNote,
   onFoldersChanged,
   onFoldersDeleted,
   onOpenCreateChantier,
   onOpenTransfer,
   onFeedback,
+  isOnline = true,
 }) => {
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const [importingGallery, setImportingGallery] = useState(false);
@@ -139,6 +161,11 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
   const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
   const [sharingSelection, setSharingSelection] = useState(false);
+  const [showBatchMoveModal, setShowBatchMoveModal] = useState(false);
+  const [prepModalMode, setPrepModalMode] = useState<'pc' | 'phone' | null>(null);
+  const [editingFolderNote, setEditingFolderNote] = useState(false);
+  const [folderNoteDraft, setFolderNoteDraft] = useState('');
+  const [savingFolderNote, setSavingFolderNote] = useState(false);
 
   const [breadcrumbs, setBreadcrumbs] = useState<BreadcrumbSegment[]>(() =>
     selectedChantier
@@ -182,7 +209,16 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
   }, [selectedChantier?.id, selectedChantier?.name]);
 
   const currentFolder = breadcrumbs[breadcrumbs.length - 1];
+  const currentFolderRecord = useMemo(
+    () => allFolders.find((f) => f.id === currentFolder.id) || null,
+    [allFolders, currentFolder.id]
+  );
   const visibleBreadcrumbs = breadcrumbs.filter((b) => b.id !== 'root');
+
+  useEffect(() => {
+    setEditingFolderNote(false);
+    setFolderNoteDraft(currentFolderRecord?.note || '');
+  }, [currentFolder.id, currentFolderRecord?.note]);
 
   const folders = useMemo(
     () =>
@@ -368,6 +404,15 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
               <span>Créer un chantier</span>
             </button>
 
+            <button
+              type="button"
+              onClick={() => setPrepModalMode('phone')}
+              className="min-h-[48px] px-4 rounded-xl border border-slate-300 bg-white text-slate-900 text-sm font-semibold hover:bg-slate-50 inline-flex items-center gap-2 cursor-pointer"
+            >
+              <FolderTree className="w-4 h-4 text-amber-600" />
+              <span>Recevoir / Importer depuis PC</span>
+            </button>
+
             {photos.length > 0 && !confirmDeleteAll && (
               <button
                 type="button"
@@ -420,6 +465,18 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
             </div>
           )}
         </div>
+
+        {prepModalMode && (
+          <FolderPrepModal
+            allFolders={allFolders}
+            selectedChantier={null}
+            initialMode={prepModalMode}
+            isOnline={isOnline}
+            onFoldersChanged={onFoldersChanged}
+            onFeedback={onFeedback}
+            onClose={() => setPrepModalMode(null)}
+          />
+        )}
       </div>
     );
   }
@@ -454,6 +511,15 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
               >
                 <FolderPlus className="w-4 h-4 text-amber-600 shrink-0" />
                 <span>Nouveau sous-dossier</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setPrepModalMode('pc')}
+                className="min-h-[42px] px-3 py-2 rounded-xl border border-slate-300 bg-white text-slate-900 text-xs font-semibold hover:bg-slate-50 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <FolderTree className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>PC ↔ Téléphone</span>
               </button>
 
               <button
@@ -615,6 +681,85 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
           {error && (
             <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
               {error}
+            </div>
+          )}
+
+          {/* Folder Note Card (exported into notes.txt in ZIP) */}
+          {currentFolderRecord && (
+            <div className="rounded-2xl border border-slate-200 bg-white px-3.5 py-2.5">
+              {editingFolderNote ? (
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    setSavingFolderNote(true);
+                    try {
+                      await onUpdateFolderNote(currentFolderRecord.id, folderNoteDraft);
+                      setEditingFolderNote(false);
+                      onFeedback?.(
+                        folderNoteDraft.trim()
+                          ? 'Note du dossier enregistrée (incluse dans notes.txt).'
+                          : 'Note du dossier supprimée.'
+                      );
+                    } finally {
+                      setSavingFolderNote(false);
+                    }
+                  }}
+                  className="space-y-2"
+                >
+                  <label className="block text-xs font-semibold text-slate-900">
+                    Note du dossier « {currentFolderRecord.name} » (exportée dans notes.txt)
+                  </label>
+                  <textarea
+                    rows={2}
+                    maxLength={600}
+                    value={folderNoteDraft}
+                    onChange={(e) => setFolderNoteDraft(e.target.value)}
+                    placeholder="Ex : Fuite sous bac à douche, reprise joint silicone prévue..."
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs text-slate-950 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    autoFocus
+                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="submit"
+                      disabled={savingFolderNote}
+                      className="min-h-[36px] px-3.5 rounded-lg bg-slate-950 text-white text-xs font-semibold hover:bg-slate-800 cursor-pointer disabled:opacity-60"
+                    >
+                      {savingFolderNote ? 'Enregistrement...' : 'Enregistrer'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingFolderNote(false);
+                        setFolderNoteDraft(currentFolderRecord.note || '');
+                      }}
+                      className="min-h-[36px] px-3 rounded-lg border border-slate-300 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 cursor-pointer"
+                    >
+                      Annuler
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <div className="min-w-0 flex items-center gap-2 text-slate-700">
+                    <MessageSquareText className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span className="truncate">
+                      {currentFolderRecord.note
+                        ? currentFolderRecord.note
+                        : 'Ajouter une note chantier pour ce dossier (exportée dans notes.txt)'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFolderNoteDraft(currentFolderRecord.note || '');
+                      setEditingFolderNote(true);
+                    }}
+                    className="min-h-[32px] px-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-semibold hover:bg-slate-50 shrink-0 cursor-pointer"
+                  >
+                    {currentFolderRecord.note ? 'Modifier' : 'Ajouter note'}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -876,6 +1021,17 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
                       <span>Partager (WhatsApp / Outlook)</span>
                     </button>
 
+                    {allFolders.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowBatchMoveModal(true)}
+                        className="min-h-[38px] px-3 rounded-xl border border-slate-300 bg-white text-slate-900 hover:bg-slate-100 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <FolderInput className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Déplacer ({selectedPhotoIds.size})</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => setConfirmDeleteSelected(true)}
@@ -1103,9 +1259,39 @@ export const FolderExplorer: React.FC<FolderExplorerProps> = ({
         <PhotoViewerModal
           photos={displayedPhotos}
           initialIndex={viewerIndex}
+          allFolders={allFolders}
           onClose={() => setViewerIndex(null)}
           onDeletePhoto={onDeletePhoto}
+          onUpdatePhotoNote={onUpdatePhotoNote}
+          onMovePhoto={(photoId, target) => onMovePhotos([photoId], target)}
           onFeedback={onFeedback}
+        />
+      )}
+
+      {showBatchMoveModal && selectedPhotoIds.size > 0 && (
+        <MovePhotosModal
+          photoCount={selectedPhotoIds.size}
+          allFolders={allFolders}
+          currentFolderId={effectivePhotoScope === 'here' ? currentFolder.id : undefined}
+          onSelectDestination={async (target) => {
+            await onMovePhotos(Array.from(selectedPhotoIds), target);
+            setShowBatchMoveModal(false);
+            setSelectedPhotoIds(new Set());
+            setSelectionMode(false);
+          }}
+          onClose={() => setShowBatchMoveModal(false)}
+        />
+      )}
+
+      {prepModalMode && (
+        <FolderPrepModal
+          allFolders={allFolders}
+          selectedChantier={selectedChantier}
+          initialMode={prepModalMode}
+          isOnline={isOnline}
+          onFoldersChanged={onFoldersChanged}
+          onFeedback={onFeedback}
+          onClose={() => setPrepModalMode(null)}
         />
       )}
     </div>

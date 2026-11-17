@@ -12,7 +12,7 @@ import {
   Smartphone,
   Trash2,
 } from 'lucide-react';
-import { LocalFolderRecord, QueuedPhoto } from '../types';
+import { LocalFolderRecord, QueuedPhoto, TargetFolder } from '../types';
 import {
   buildPhotosZipBlob,
   formatBytes,
@@ -93,6 +93,8 @@ interface UploadQueueProps {
   onConfirmPcAck: (sentIds: string[], autoDelete: boolean) => Promise<void>;
   onDeletePhoto: (id: string) => Promise<void>;
   onDeletePhotosBatch: (ids: string[]) => Promise<void>;
+  onMovePhotos?: (photoIds: string[], target: TargetFolder) => Promise<void>;
+  onUpdatePhotoNote?: (photoId: string, note: string) => Promise<void>;
   onFeedback?: (message: string) => void;
 }
 
@@ -130,6 +132,8 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
   onConfirmPcAck,
   onDeletePhoto,
   onDeletePhotosBatch,
+  onMovePhotos,
+  onUpdatePhotoNote,
   onFeedback,
 }) => {
   const [roleMode, setRoleMode] = useState<'phone' | 'pc'>(() =>
@@ -384,7 +388,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
     setExportingZip(true);
     setPhoneTransferMsg(null);
     try {
-      const zipBlob = await buildPhotosZipBlob(scopedPhotos, scopedFolderPaths);
+      const zipBlob = await buildPhotosZipBlob(scopedPhotos, scopedFolderPaths, allFolders);
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement('a');
       a.href = url;
@@ -420,7 +424,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
     setSharingZip(true);
     setPhoneTransferMsg(null);
     try {
-      const zipBlob = await buildPhotosZipBlob(scopedPhotos, scopedFolderPaths);
+      const zipBlob = await buildPhotosZipBlob(scopedPhotos, scopedFolderPaths, allFolders);
       const safeSlug =
         isChantierScoped && selectedChantier
           ? selectedChantier.name
@@ -512,7 +516,7 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
         folderId: '',
         folderPath: p.folderPath,
       }));
-      const zipBlob = await buildPhotosZipBlob(zipInput, p2pFolderPaths);
+      const zipBlob = await buildPhotosZipBlob(zipInput, p2pFolderPaths, allFolders);
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement('a');
       a.href = url;
@@ -1062,6 +1066,11 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
                     <div className="text-xs text-slate-600 truncate">
                       {photo.folderPath}
                     </div>
+                    {photo.note && (
+                      <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-0.5 truncate">
+                        Note : {photo.note}
+                      </div>
+                    )}
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 tabular-nums">
                       <span>{formatBytes(photo.size)}</span>
                       <span aria-hidden="true">·</span>
@@ -1123,8 +1132,13 @@ export const UploadQueue: React.FC<UploadQueueProps> = ({
         <PhotoViewerModal
           photos={scopedPhotos}
           initialIndex={viewerIndex}
+          allFolders={allFolders}
           onClose={() => setViewerIndex(null)}
           onDeletePhoto={onDeletePhoto}
+          onUpdatePhotoNote={onUpdatePhotoNote}
+          onMovePhoto={
+            onMovePhotos ? (photoId, target) => onMovePhotos([photoId], target) : undefined
+          }
           onFeedback={onFeedback}
         />
       )}

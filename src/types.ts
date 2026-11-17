@@ -17,6 +17,7 @@ export interface QueuedPhoto {
   capturedAt: number;
   folderId: string;
   folderPath: string;
+  note?: string;
 }
 
 export interface LocalFolderRecord {
@@ -24,6 +25,7 @@ export interface LocalFolderRecord {
   parentId: string;
   name: string;
   createdAt: number;
+  note?: string;
 }
 
 export interface CaptureSettings {
@@ -31,3 +33,16 @@ export interface CaptureSettings {
   burnStamp: boolean;
   jpegQuality: number;
 }
+
+export interface PortableFolderNode {
+  name: string;
+  note?: string;
+  children?: PortableFolderNode[];
+}
+
+export interface PortableFolderBundle {
+  version: 1;
+  exportedAt: number;
+  chantiers: PortableFolderNode[];
+}
+

@@ -4,6 +4,7 @@ import {
   Clock,
   Loader2,
   LogOut,
+  MailPlus,
   ShieldCheck,
   ShieldOff,
   Trash2,
@@ -13,42 +14,67 @@ import {
 import {
   AccessUserRecord,
   ADMIN_EMAIL,
+  adminAddPreauthorizedEmail,
   adminDeleteAccessUser,
+  adminRemovePreauthorizedEmail,
   adminUpdateUserStatus,
+  extractFirestoreErrorReason,
+  PreauthorizedEmailRecord,
   subscribeToAllAccessUsers,
+  subscribeToPreauthorizedEmails,
 } from '../lib/accessControl';
 
 interface AdminAccessPanelProps {
+  adminUid: string;
   currentEmail: string;
   onSignOut: () => Promise<void>;
   onFeedback?: (msg: string) => void;
 }
 
 export const AdminAccessPanel: React.FC<AdminAccessPanelProps> = ({
+  adminUid,
   currentEmail,
   onSignOut,
   onFeedback,
 }) => {
   const [users, setUsers] = useState<AccessUserRecord[]>([]);
+  const [preauthEmails, setPreauthEmails] = useState<PreauthorizedEmailRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyUid, setBusyUid] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmDeleteUid, setConfirmDeleteUid] = useState<string | null>(null);
+  const [newPreauthEmail, setNewPreauthEmail] = useState('');
+  const [newPreauthNote, setNewPreauthNote] = useState('');
+  const [addingPreauth, setAddingPreauth] = useState(false);
 
   useEffect(() => {
     setLoading(true);
-    const unsubscribe = subscribeToAllAccessUsers(
+    const unsubUsers = subscribeToAllAccessUsers(
       (list) => {
         setUsers(list);
         setLoading(false);
         setError(null);
       },
       (err) => {
-        setError(err.message);
+        const reason = extractFirestoreErrorReason(err);
+        setError(
+          reason.toLowerCase().includes('quota')
+            ? 'Quota gratuit Firestore atteint pour aujourd’hui : il sera réinitialisé automatiquement demain.'
+            : reason
+        );
         setLoading(false);
       }
     );
-    return () => unsubscribe();
+    const unsubPreauth = subscribeToPreauthorizedEmails(
+      (items) => {
+        setPreauthEmails(items);
+      },
+      () => {}
+    );
+    return () => {
+      unsubUsers();
+      unsubPreauth();
+    };
   }, []);
 
   const pendingUsers = useMemo(
@@ -88,6 +114,46 @@ export const AdminAccessPanel: React.FC<AdminAccessPanelProps> = ({
       onFeedback?.('Compte retiré de la liste.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erreur lors de la suppression.');
+    } finally {
+      setBusyUid(null);
+    }
+  };
+
+  const handleAddPreauth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = newPreauthEmail.trim().toLowerCase();
+    if (!cleanEmail) return;
+    setAddingPreauth(true);
+    setError(null);
+    try {
+      await adminAddPreauthorizedEmail(cleanEmail, newPreauthNote, adminUid);
+      const existingMatching = users.find(
+        (u) => u.email.trim().toLowerCase() === cleanEmail && u.role !== 'admin' && u.status !== 'approved'
+      );
+      if (existingMatching) {
+        await adminUpdateUserStatus(existingMatching.uid, 'approved', newPreauthNote.trim() || undefined);
+      }
+      setNewPreauthEmail('');
+      setNewPreauthNote('');
+      onFeedback?.(
+        existingMatching
+          ? `${cleanEmail} pré-autorisé et activé immédiatement.`
+          : `${cleanEmail} pré-autorisé : il entrera directement dès sa première connexion.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Impossible d’ajouter cet e-mail.');
+    } finally {
+      setAddingPreauth(false);
+    }
+  };
+
+  const handleRemovePreauth = async (item: PreauthorizedEmailRecord) => {
+    setBusyUid(item.id);
+    try {
+      await adminRemovePreauthorizedEmail(item.id);
+      onFeedback?.(`Pré-autorisation retirée pour ${item.email}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Erreur lors du retrait.');
     } finally {
       setBusyUid(null);
     }
@@ -133,6 +199,82 @@ export const AdminAccessPanel: React.FC<AdminAccessPanelProps> = ({
         </div>
       ) : (
         <div className="space-y-4">
+          {/* Pre-authorize colleague by email */}
+          <section className="rounded-2xl border border-slate-300 bg-white overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-bold text-slate-950">
+                <MailPlus className="w-4 h-4 text-amber-600" />
+                <span>Pré-autoriser un collègue par e-mail ({preauthEmails.length})</span>
+              </div>
+            </div>
+
+            <div className="p-4 space-y-3">
+              <p className="text-xs text-slate-700">
+                Ajoutez l’adresse Google d’un collègue à l’avance : il accèdera à l’application directement dès sa première connexion sans attendre votre validation.
+              </p>
+
+              <form onSubmit={handleAddPreauth} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                <input
+                  type="email"
+                  required
+                  value={newPreauthEmail}
+                  onChange={(e) => setNewPreauthEmail(e.target.value)}
+                  placeholder="collegue@gmail.com"
+                  className="sm:col-span-5 min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm text-slate-950 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+                <input
+                  type="text"
+                  value={newPreauthNote}
+                  onChange={(e) => setNewPreauthNote(e.target.value)}
+                  placeholder="Nom / équipe (optionnel)"
+                  maxLength={120}
+                  className="sm:col-span-4 min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm text-slate-950 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+                <button
+                  type="submit"
+                  disabled={addingPreauth || !newPreauthEmail.trim()}
+                  className="sm:col-span-3 min-h-[42px] px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                >
+                  {addingPreauth ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <MailPlus className="w-4 h-4" />
+                  )}
+                  <span>Pré-autoriser</span>
+                </button>
+              </form>
+
+              {preauthEmails.length > 0 && (
+                <ul className="divide-y divide-slate-200 rounded-xl border border-slate-200 overflow-hidden">
+                  {preauthEmails.map((item) => (
+                    <li
+                      key={item.id}
+                      className="px-3.5 py-2.5 bg-slate-50 flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-950 truncate">
+                          {item.email}
+                        </div>
+                        {item.note && (
+                          <div className="text-[11px] text-slate-600 truncate">{item.note}</div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={busyUid === item.id}
+                        onClick={() => handleRemovePreauth(item)}
+                        className="min-h-[34px] px-2.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:text-red-600 hover:bg-red-50 text-xs font-medium inline-flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Retirer</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </section>
+
           {/* Pending Requests */}
           <section className="rounded-2xl border border-slate-300 bg-white overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2">

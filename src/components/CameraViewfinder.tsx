@@ -8,6 +8,7 @@ import {
   ImagePlus,
   Loader2,
   Maximize2,
+  MessageSquareText,
   Minimize2,
   RefreshCw,
   Stamp,
@@ -28,7 +29,7 @@ interface CameraViewfinderProps {
   recentSessionPhotos: QueuedPhoto[];
   totalStoredPhotos: number;
   onUpdateSettings: (next: CaptureSettings) => void;
-  onPhotoCaptured: (blob: Blob, filename: string) => Promise<void>;
+  onPhotoCaptured: (blob: Blob, filename: string, note?: string) => Promise<void>;
   onChangeFolder: () => void;
   onOpenTransfer: () => void;
 }
@@ -79,6 +80,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   const [rearLenses, setRearLenses] = useState<{ deviceId: string; label: string }[]>([]);
   const [selectedRearDeviceId, setSelectedRearDeviceId] = useState<string | null>(null);
   const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
+  const [pendingNote, setPendingNote] = useState('');
 
   const enterFullscreen = useCallback(async () => {
     setIsFullscreen(true);
@@ -377,7 +379,11 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       const nextSeq = sessionCount + 1;
       setSessionCount(nextSeq);
       const filename = buildPhotoFilename(settings.prefix, nextSeq);
-      await onPhotoCaptured(blob, filename);
+      const cleanNote = pendingNote.trim();
+      await onPhotoCaptured(blob, filename, cleanNote || undefined);
+      if (cleanNote) {
+        setPendingNote('');
+      }
     } finally {
       setCapturing(false);
     }
@@ -392,6 +398,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       .map((s) => s.name)
       .join(' / ');
     const stampLabel = settings.burnStamp ? pathText || activeTarget.name : undefined;
+    const cleanNote = pendingNote.trim() || undefined;
 
     setImportingProgress({ current: 0, total: files.length });
     try {
@@ -405,17 +412,20 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
               stampFolderLabel: stampLabel,
               quality: settings.jpegQuality,
             });
-            await onPhotoCaptured(processed, filename);
+            await onPhotoCaptured(processed, filename, cleanNote);
             setImportingProgress({ current: i + 1, total: files.length });
             continue;
           } catch {
             // Fallback to original file if browser cannot decode format
           }
         }
-        await onPhotoCaptured(file, filename);
+        await onPhotoCaptured(file, filename, cleanNote);
         setImportingProgress({ current: i + 1, total: files.length });
       }
       setSessionCount(seq);
+      if (cleanNote) {
+        setPendingNote('');
+      }
     } finally {
       setImportingProgress(null);
       e.target.value = '';
@@ -526,12 +536,43 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                     {fullPath}
                   </div>
                 )}
-                <div className="self-start px-3 py-1.5 rounded-xl bg-slate-950/65 backdrop-blur-md text-xs font-medium text-white tabular-nums">
-                  Série : {sessionCount} photo{sessionCount > 1 ? 's' : ''}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="self-start px-3 py-1.5 rounded-xl bg-slate-950/65 backdrop-blur-md text-xs font-medium text-white tabular-nums">
+                    Série : {sessionCount} photo{sessionCount > 1 ? 's' : ''}
+                  </div>
+                  {pendingNote.trim() && (
+                    <div className="px-2.5 py-1.5 rounded-xl bg-amber-500/90 text-slate-950 text-[11px] font-bold inline-flex items-center gap-1 max-w-[180px] truncate">
+                      <MessageSquareText className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{pendingNote.trim()}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateSettings({ ...settings, burnStamp: !settings.burnStamp })
+                  }
+                  aria-label={
+                    settings.burnStamp
+                      ? 'Désactiver l’horodatage sur photo'
+                      : 'Activer l’horodatage sur photo'
+                  }
+                  title={
+                    settings.burnStamp
+                      ? 'Horodatage sur photo : Activé'
+                      : 'Horodatage sur photo : Désactivé'
+                  }
+                  className={`min-h-[40px] min-w-[40px] rounded-xl backdrop-blur-md flex items-center justify-center transition-colors cursor-pointer ${
+                    settings.burnStamp
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'bg-slate-950/65 text-white hover:bg-slate-900'
+                  }`}
+                >
+                  <Stamp className="w-4 h-4" />
+                </button>
                 <button
                   type="button"
                   onClick={() => setShowGrid((v) => !v)}
@@ -859,6 +900,32 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                   }`}
                 />
               </button>
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-semibold text-slate-800 inline-flex items-center gap-1.5">
+                  <MessageSquareText className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Note rapide pour la prochaine photo</span>
+                </label>
+                {pendingNote && (
+                  <button
+                    type="button"
+                    onClick={() => setPendingNote('')}
+                    className="text-[11px] font-medium text-slate-500 hover:text-slate-900 cursor-pointer"
+                  >
+                    Effacer
+                  </button>
+                )}
+              </div>
+              <input
+                type="text"
+                maxLength={300}
+                value={pendingNote}
+                onChange={(e) => setPendingNote(e.target.value)}
+                placeholder="Ex : Fissure mur nord (exportée dans notes.txt)"
+                className="w-full min-h-[40px] px-3 rounded-xl border border-slate-300 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
             </div>
           </div>
 

@@ -32,7 +32,24 @@ service cloud.firestore {
 
     // Sole administrator authorized to approve or revoke colleague access
     function isAdmin() {
-      return isVerifiedUser() && request.auth.token.email == 'pirquinfabien@gmail.com';
+      return isVerifiedUser() &&
+        'email' in request.auth.token &&
+        request.auth.token.email is string &&
+        request.auth.token.email.lower() == 'pirquinfabien@gmail.com';
+    }
+
+    function callerPreauthDocId() {
+      return request.auth.token.email.lower().replace('[^a-z0-9-]', '_');
+    }
+
+    function isPreauthorizedCaller() {
+      return isSignedIn() &&
+        'email' in request.auth.token &&
+        request.auth.token.email is string &&
+        callerPreauthDocId().size() >= 3 &&
+        callerPreauthDocId().size() <= 128 &&
+        exists(/databases/$(database)/documents/preauthorized_emails/$(callerPreauthDocId())) &&
+        get(/databases/$(database)/documents/preauthorized_emails/$(callerPreauthDocId())).data.email.lower() == request.auth.token.email.lower();
     }
 
     function isValidAccessUser(data, userId) {
@@ -49,11 +66,21 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidPreauthorizedEmail(data, emailId) {
+      return data.keys().hasAll(['id', 'email', 'createdBy', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'email', 'note', 'createdBy', 'createdAt']) &&
+        data.id is string && data.id == emailId && isValidId(data.id) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 200)) &&
+        data.createdBy is string && data.createdBy == request.auth.uid && isValidId(data.createdBy) &&
+        data.createdAt is timestamp;
+    }
+
     match /access_users/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin();
 
-      allow create: if isVerifiedUser() &&
+      allow create: if isSignedIn() &&
         isValidId(userId) &&
         isValidAccessUser(incoming(), userId) &&
         incoming().createdAt == request.time &&
@@ -64,14 +91,16 @@ service cloud.firestore {
           )) ||
           (
             isOwner(userId) &&
-            incoming().email == request.auth.token.email &&
+            'email' in request.auth.token &&
+            request.auth.token.email is string &&
+            incoming().email.lower() == request.auth.token.email.lower() &&
             incoming().role == 'user' &&
-            incoming().status == 'pending' &&
+            (incoming().status == 'pending' || (incoming().status == 'approved' && isPreauthorizedCaller())) &&
             !('note' in incoming())
           )
         );
 
-      allow update: if isVerifiedUser() &&
+      allow update: if isSignedIn() &&
         isValidId(userId) &&
         isValidAccessUser(incoming(), userId) &&
         incoming().uid == existing().uid &&
@@ -92,6 +121,30 @@ service cloud.firestore {
         );
 
       allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    match /preauthorized_emails/{emailId} {
+      allow get: if isAdmin() || (
+        isSignedIn() &&
+        isValidId(emailId) &&
+        'email' in request.auth.token &&
+        request.auth.token.email is string &&
+        emailId == callerPreauthDocId()
+      );
+      allow list: if isAdmin();
+      allow create: if isAdmin() &&
+        isValidId(emailId) &&
+        isValidPreauthorizedEmail(incoming(), emailId) &&
+        incoming().createdAt == request.time;
+      allow update: if isAdmin() &&
+        isValidId(emailId) &&
+        isValidPreauthorizedEmail(incoming(), emailId) &&
+        incoming().id == existing().id &&
+        incoming().email == existing().email &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['note']);
+      allow delete: if isAdmin() && isValidId(emailId);
     }
   }
 }

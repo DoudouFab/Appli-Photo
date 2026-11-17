@@ -28,6 +28,8 @@ interface TransferRoom {
   received: boolean;
   folderPaths: string[];
   photos: TransferPhoto[];
+  folderBundle?: unknown;
+  folderBundleReceived?: boolean;
 }
 
 const transferRooms = new Map<string, TransferRoom>();
@@ -222,6 +224,43 @@ async function startServer() {
       }
     }, 15_000);
 
+    return res.json({ ok: true });
+  });
+
+  app.post('/api/transfer/:code/folder-bundle', (req: Request, res: Response) => {
+    pruneTransferRooms();
+    const code = String(req.params.code || '').replace(/\D/g, '');
+    const room = transferRooms.get(code);
+    if (!room) return res.status(404).json({ error: 'SESSION_NOT_FOUND' });
+
+    const bundle = req.body?.bundle;
+    if (!bundle || typeof bundle !== 'object' || !Array.isArray(bundle.chantiers)) {
+      return res.status(400).json({ error: 'INVALID_BUNDLE' });
+    }
+    room.folderBundle = bundle;
+    room.folderBundleReceived = false;
+    return res.status(201).json({ ok: true });
+  });
+
+  app.get('/api/transfer/:code/folder-bundle', (req: Request, res: Response) => {
+    pruneTransferRooms();
+    const code = String(req.params.code || '').replace(/\D/g, '');
+    const room = transferRooms.get(code);
+    if (!room) return res.status(404).json({ error: 'SESSION_NOT_FOUND' });
+
+    return res.json({
+      ready: Boolean(room.folderBundle),
+      bundle: room.folderBundle || null,
+      received: Boolean(room.folderBundleReceived),
+    });
+  });
+
+  app.post('/api/transfer/:code/folder-bundle/ack', (req: Request, res: Response) => {
+    const code = String(req.params.code || '').replace(/\D/g, '');
+    const room = transferRooms.get(code);
+    if (!room) return res.status(404).json({ error: 'SESSION_NOT_FOUND' });
+
+    room.folderBundleReceived = true;
     return res.json({ ok: true });
   });
 

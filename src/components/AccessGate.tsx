@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { User, signInWithPopup, signOut } from 'firebase/auth';
-import { doc, getDocFromServer } from 'firebase/firestore';
 import {
   Clock,
   Loader2,
@@ -10,12 +9,13 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
-import { auth, db, googleProvider } from '../lib/firebase';
+import { auth, googleProvider } from '../lib/firebase';
 import {
   AccessUserRecord,
-  ADMIN_EMAIL,
   clearCachedApproval,
-  saveCachedApproval,
+  extractFirestoreErrorReason,
+  fetchOrCreateOwnAccessRecord,
+  isOfflineFirestoreError,
 } from '../lib/accessControl';
 
 interface AccessGateProps {
@@ -78,23 +78,16 @@ export const AccessGate: React.FC<AccessGateProps> = ({
     setRefreshing(true);
     setAuthError(null);
     try {
-      const snap = await getDocFromServer(doc(db, 'access_users', user.uid));
-      if (snap.exists()) {
-        const rec = snap.data() as AccessUserRecord;
-        saveCachedApproval({
-          uid: rec.uid,
-          email: rec.email,
-          role: rec.role,
-          status: rec.status,
-        });
-        onManualAccessRefresh(rec);
-      }
+      const rec = await fetchOrCreateOwnAccessRecord(user);
+      onManualAccessRefresh(rec);
     } catch (err) {
-      setAuthError(
-        err instanceof Error && err.message.includes('offline')
-          ? 'Aucune connexion internet pour vérifier l’autorisation.'
-          : 'Impossible de vérifier le statut pour le moment.'
-      );
+      if (isOfflineFirestoreError(err)) {
+        setAuthError('Aucune connexion internet pour vérifier l’autorisation.');
+      } else {
+        setAuthError(
+          `Impossible d’enregistrer ou vérifier votre demande (${extractFirestoreErrorReason(err)}).`
+        );
+      }
     } finally {
       setRefreshing(false);
     }
@@ -173,20 +166,34 @@ export const AccessGate: React.FC<AccessGateProps> = ({
           </div>
         )}
 
-        {/* Signed In -> Offline Blocked (never approved offline) */}
+        {/* Signed In -> Error / Offline Blocked (never approved offline) */}
         {user && offlineBlockedMessage && (
           <div className="space-y-4">
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 space-y-2 text-xs text-slate-900">
-              <div className="font-bold text-sm">Connexion internet requise la 1re fois</div>
-              <p>{offlineBlockedMessage}</p>
+              <div className="font-bold text-sm">
+                {offlineBlockedMessage.toLowerCase().includes('internet')
+                  ? 'Connexion internet requise la 1re fois'
+                  : 'Vérification d’accès impossible'}
+              </div>
+              <p className="break-words">{offlineBlockedMessage}</p>
             </div>
+            {authError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs text-red-900 break-words">
+                {authError}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
+                disabled={refreshing}
                 onClick={handleCheckStatus}
-                className="min-h-[46px] px-3 rounded-xl bg-slate-950 text-white text-xs font-semibold hover:bg-slate-800 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                className="min-h-[46px] px-3 rounded-xl bg-slate-950 text-white text-xs font-semibold hover:bg-slate-800 inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
               >
-                <RefreshCw className="w-4 h-4" />
+                {refreshing ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
                 <span>Réessayer</span>
               </button>
               <button
@@ -212,7 +219,7 @@ export const AccessGate: React.FC<AccessGateProps> = ({
               <p className="text-xs leading-relaxed text-slate-800">
                 Votre demande a bien été enregistrée pour{' '}
                 <strong>{user.email}</strong>. Demandez à{' '}
-                <strong>{ADMIN_EMAIL}</strong> d’activer votre accès depuis son application.
+                <strong>Fabien Pirquin</strong> d’activer votre accès depuis son application.
               </p>
               <p className="text-[11px] text-slate-700">
                 Dès que l’accès est validé, cet écran se débloque automatiquement sans avoir à vous reconnecter.
@@ -261,7 +268,7 @@ export const AccessGate: React.FC<AccessGateProps> = ({
                 <span>Accès non autorisé</span>
               </div>
               <p className="text-xs leading-relaxed text-red-900">
-                L’accès pour <strong>{user.email}</strong> a été suspendu ou refusé par l’administrateur ({ADMIN_EMAIL}).
+                L’accès pour <strong>{user.email}</strong> a été suspendu ou refusé par l’administrateur (Fabien Pirquin).
               </p>
             </div>
 

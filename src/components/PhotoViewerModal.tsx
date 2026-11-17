@@ -3,28 +3,37 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  FolderInput,
   Loader2,
+  MessageSquareText,
   Share2,
   Trash2,
   X,
 } from 'lucide-react';
-import { QueuedPhoto } from '../types';
+import { LocalFolderRecord, QueuedPhoto, TargetFolder } from '../types';
 import { formatBytes } from '../lib/storage';
 import { downloadBlobFile, sharePhotosNativeOrDownload } from '../lib/share';
+import { MovePhotosModal } from './MovePhotosModal';
 
 interface PhotoViewerModalProps {
   photos: QueuedPhoto[];
   initialIndex: number;
+  allFolders?: LocalFolderRecord[];
   onClose: () => void;
   onDeletePhoto: (id: string) => Promise<void>;
+  onUpdatePhotoNote?: (photoId: string, note: string) => Promise<void>;
+  onMovePhoto?: (photoId: string, target: TargetFolder) => Promise<void>;
   onFeedback?: (message: string) => void;
 }
 
 export const PhotoViewerModal: React.FC<PhotoViewerModalProps> = ({
   photos,
   initialIndex,
+  allFolders,
   onClose,
   onDeletePhoto,
+  onUpdatePhotoNote,
+  onMovePhoto,
   onFeedback,
 }) => {
   const [index, setIndex] = useState(() =>
@@ -34,6 +43,10 @@ export const PhotoViewerModal: React.FC<PhotoViewerModalProps> = ({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteDraft, setNoteDraft] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
+  const [showMoveModal, setShowMoveModal] = useState(false);
   const touchStartXRef = useRef<number | null>(null);
 
   const safeIndex = Math.min(Math.max(0, index), Math.max(0, photos.length - 1));
@@ -49,6 +62,8 @@ export const PhotoViewerModal: React.FC<PhotoViewerModalProps> = ({
 
   useEffect(() => {
     setConfirmDelete(false);
+    setEditingNote(false);
+    setNoteDraft(currentPhoto?.note || '');
     if (!currentPhoto) {
       setImageUrl(null);
       return;
@@ -126,6 +141,19 @@ export const PhotoViewerModal: React.FC<PhotoViewerModalProps> = ({
       onFeedback?.('Photo supprimée.');
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleSaveNote = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onUpdatePhotoNote) return;
+    setSavingNote(true);
+    try {
+      await onUpdatePhotoNote(currentPhoto.id, noteDraft);
+      setEditingNote(false);
+      onFeedback?.(noteDraft.trim() ? 'Note enregistrée sur la photo.' : 'Note retirée.');
+    } finally {
+      setSavingNote(false);
     }
   };
 
@@ -208,6 +236,63 @@ export const PhotoViewerModal: React.FC<PhotoViewerModalProps> = ({
         )}
       </div>
 
+      {/* Photo Note Strip (if present or editing) */}
+      {(currentPhoto.note || editingNote) && (
+        <div className="border-t border-slate-800 bg-slate-900/95 px-3 sm:px-5 py-2.5 shrink-0">
+          {editingNote ? (
+            <form onSubmit={handleSaveNote} className="mx-auto max-w-xl flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value)}
+                maxLength={300}
+                autoFocus
+                placeholder="Note pour cette photo (exportée dans notes.txt)..."
+                className="flex-1 min-w-0 min-h-[40px] px-3 rounded-xl border border-slate-700 bg-slate-950 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="submit"
+                  disabled={savingNote}
+                  className="min-h-[40px] px-3.5 rounded-xl bg-amber-500 text-slate-950 text-xs font-bold hover:bg-amber-400 cursor-pointer disabled:opacity-60"
+                >
+                  {savingNote ? 'Enreg...' : 'Enregistrer'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingNote(false);
+                    setNoteDraft(currentPhoto.note || '');
+                  }}
+                  className="min-h-[40px] px-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-medium hover:bg-slate-700 cursor-pointer"
+                >
+                  Annuler
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="mx-auto max-w-xl flex items-center justify-between gap-3 text-xs">
+              <div className="min-w-0 flex items-start gap-2 text-slate-200">
+                <MessageSquareText className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <span className="break-words">{currentPhoto.note}</span>
+              </div>
+              {onUpdatePhotoNote && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNoteDraft(currentPhoto.note || '');
+                    setEditingNote(true);
+                  }}
+                  className="text-amber-400 font-semibold hover:underline shrink-0 cursor-pointer"
+                >
+                  Modifier
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Bottom Thumb-Zone Action Bar */}
       <footer className="border-t border-slate-800 bg-slate-950/95 px-3 sm:px-5 py-3 pb-safe shrink-0">
         {confirmDelete ? (
@@ -234,12 +319,12 @@ export const PhotoViewerModal: React.FC<PhotoViewerModalProps> = ({
             </div>
           </div>
         ) : (
-          <div className="mx-auto max-w-xl grid grid-cols-3 gap-2">
+          <div className="mx-auto max-w-2xl flex flex-wrap items-center justify-center gap-2">
             <button
               type="button"
               disabled={sharing}
               onClick={handleShare}
-              className="min-h-[48px] px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+              className="flex-1 min-w-[96px] min-h-[46px] px-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
               title="Partager vers WhatsApp, Messenger, Outlook..."
             >
               {sharing ? (
@@ -250,10 +335,35 @@ export const PhotoViewerModal: React.FC<PhotoViewerModalProps> = ({
               <span className="truncate">Partager</span>
             </button>
 
+            {onUpdatePhotoNote && (
+              <button
+                type="button"
+                onClick={() => {
+                  setNoteDraft(currentPhoto.note || '');
+                  setEditingNote((v) => !v);
+                }}
+                className="flex-1 min-w-[84px] min-h-[46px] px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <MessageSquareText className="w-4 h-4 text-amber-400 shrink-0" />
+                <span className="truncate">Note</span>
+              </button>
+            )}
+
+            {onMovePhoto && allFolders && allFolders.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setShowMoveModal(true)}
+                className="flex-1 min-w-[92px] min-h-[46px] px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <FolderInput className="w-4 h-4 text-amber-400 shrink-0" />
+                <span className="truncate">Déplacer</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => downloadBlobFile(currentPhoto.blob, currentPhoto.filename)}
-              className="min-h-[48px] px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="flex-1 min-w-[92px] min-h-[46px] px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Download className="w-4 h-4 shrink-0" />
               <span className="truncate">Enregistrer</span>
@@ -262,14 +372,28 @@ export const PhotoViewerModal: React.FC<PhotoViewerModalProps> = ({
             <button
               type="button"
               onClick={() => setConfirmDelete(true)}
-              className="min-h-[48px] px-3 rounded-xl bg-red-950/70 border border-red-500/40 hover:bg-red-900/70 text-red-200 text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="min-h-[46px] px-3 rounded-xl bg-red-950/70 border border-red-500/40 hover:bg-red-900/70 text-red-200 text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              aria-label="Supprimer cette photo"
             >
               <Trash2 className="w-4 h-4 shrink-0" />
-              <span className="truncate">Supprimer</span>
+              <span className="hidden sm:inline">Supprimer</span>
             </button>
           </div>
         )}
       </footer>
+
+      {showMoveModal && allFolders && onMovePhoto && (
+        <MovePhotosModal
+          photoCount={1}
+          allFolders={allFolders}
+          currentFolderId={currentPhoto.folderId}
+          onSelectDestination={async (target) => {
+            await onMovePhoto(currentPhoto.id, target);
+            setShowMoveModal(false);
+          }}
+          onClose={() => setShowMoveModal(false)}
+        />
+      )}
     </div>
   );
 };
