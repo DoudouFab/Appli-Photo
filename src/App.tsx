@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import {
   Camera,
   FolderPlus,
@@ -6,6 +7,8 @@ import {
   Home,
   Layers,
   ListChecks,
+  LogOut,
+  ShieldCheck,
   WifiOff,
 } from 'lucide-react';
 import {
@@ -31,18 +34,37 @@ import {
   saveCaptureSettings,
   savePhotoRecord,
 } from './lib/storage';
+import { auth } from './lib/firebase';
+import {
+  AccessUserRecord,
+  clearCachedApproval,
+  isAdminEmail,
+  loadCachedApproval,
+  refreshOwnDeviceMetadata,
+  subscribeToAllAccessUsers,
+  subscribeToOwnAccessRecord,
+} from './lib/accessControl';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { useStorageQuota } from './hooks/useStorageQuota';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { AccessGate } from './components/AccessGate';
+import { AdminAccessPanel } from './components/AdminAccessPanel';
 import { HomeDashboard } from './components/HomeDashboard';
 import { FolderExplorer } from './components/FolderExplorer';
 import { CameraViewfinder } from './components/CameraViewfinder';
 import { UploadQueue } from './components/UploadQueue';
 
-type ActiveTab = 'home' | 'folders' | 'camera' | 'queue';
+type ActiveTab = 'home' | 'folders' | 'camera' | 'queue' | 'access';
 
 export function App() {
   const isOnline = useOnlineStatus();
+
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [accessRecord, setAccessRecord] = useState<AccessUserRecord | null>(null);
+  const [checkingAccess, setCheckingAccess] = useState(false);
+  const [offlineBlockedMessage, setOfflineBlockedMessage] = useState<string | null>(null);
+  const [pendingAccessCount, setPendingAccessCount] = useState(0);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [activeTarget, setActiveTarget] = useState<TargetFolder | null>(() =>
@@ -137,13 +159,98 @@ export function App() {
     }
   }, []);
 
+  const isRootAdmin = Boolean(
+    authUser && isAdminEmail(authUser.email, authUser.emailVerified)
+  );
+  const cachedApproval = authUser ? loadCachedApproval(authUser.uid) : null;
+  const isApprovedOfflineFallback = Boolean(
+    !isOnline && authUser && cachedApproval?.status === 'approved'
+  );
+  const isAuthorized = Boolean(
+    authUser &&
+      (isRootAdmin ||
+        accessRecord?.status === 'approved' ||
+        isApprovedOfflineFallback)
+  );
+
+  // Firebase Auth persistent listener (login once per device)
   useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setAuthUser(user);
+      setAuthLoading(false);
+      if (!user) {
+        setAccessRecord(null);
+        setCheckingAccess(false);
+        setOfflineBlockedMessage(null);
+        setPendingAccessCount(0);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Live Firestore authorization listener for signed-in user
+  useEffect(() => {
+    if (!authUser) return;
+    setCheckingAccess(true);
+    setOfflineBlockedMessage(null);
+
+    const unsub = subscribeToOwnAccessRecord(
+      authUser,
+      (record) => {
+        setAccessRecord(record);
+        setCheckingAccess(false);
+        setOfflineBlockedMessage(null);
+        if (record && navigator.onLine) {
+          void refreshOwnDeviceMetadata(authUser);
+        }
+      },
+      () => {
+        setCheckingAccess(false);
+        const cached = loadCachedApproval(authUser.uid);
+        if (isAdminEmail(authUser.email, authUser.emailVerified) || cached?.status === 'approved') {
+          setOfflineBlockedMessage(null);
+        } else {
+          setOfflineBlockedMessage(
+            'Connectez-vous à internet pour vérifier votre autorisation initiale auprès de l’administrateur.'
+          );
+        }
+      }
+    );
+
+    return () => unsub();
+  }, [authUser]);
+
+  // Live pending requests counter for sole Admin (pirquinfabien@gmail.com)
+  useEffect(() => {
+    if (!isRootAdmin) {
+      setPendingAccessCount(0);
+      return;
+    }
+    const unsub = subscribeToAllAccessUsers(
+      (users) => {
+        setPendingAccessCount(
+          users.filter((u) => u.status === 'pending' && u.role !== 'admin').length
+        );
+      },
+      () => {}
+    );
+    return () => unsub();
+  }, [isRootAdmin]);
+
+  useEffect(() => {
+    if (!isAuthorized) return;
     loadStoredPhotos();
     refreshFolders();
     if (navigator.storage && typeof navigator.storage.persist === 'function') {
       navigator.storage.persist().catch(() => {});
     }
-  }, [loadStoredPhotos, refreshFolders]);
+  }, [isAuthorized, loadStoredPhotos, refreshFolders]);
+
+  const handleSignOut = async () => {
+    clearCachedApproval();
+    await signOut(auth);
+    setActiveTab('home');
+  };
 
   // Background poll for HTTP PC confirmation even if user switches tabs on phone
   useEffect(() => {
@@ -379,6 +486,19 @@ export function App() {
     ? photos.filter((p) => p.folderId === activeTarget.id)
     : [];
 
+  if (!isAuthorized) {
+    return (
+      <AccessGate
+        authLoading={authLoading}
+        user={authUser}
+        accessRecord={accessRecord}
+        checkingAccess={checkingAccess}
+        offlineBlockedMessage={offlineBlockedMessage}
+        onManualAccessRefresh={(rec) => setAccessRecord(rec)}
+      />
+    );
+  }
+
   return (
     <div className="min-h-[100dvh] w-full max-w-full overflow-x-clip flex flex-col bg-slate-100 text-slate-950">
       {/* Top Bar — 3-Zone Contract on Desktop, Compact 52px Header on Mobile */}
@@ -457,10 +577,40 @@ export function App() {
           >
             Transfert{totalCount > 0 ? ` (${totalCount})` : ''}
           </button>
+          {isRootAdmin && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('access')}
+              className={`whitespace-nowrap shrink-0 cursor-pointer transition-colors tabular-nums ${
+                activeTab === 'access'
+                  ? 'text-slate-950 font-semibold underline decoration-amber-500 decoration-2 underline-offset-8'
+                  : 'hover:text-slate-950'
+              }`}
+            >
+              Accès{pendingAccessCount > 0 ? ` (${pendingAccessCount})` : ''}
+            </button>
+          )}
         </nav>
 
-        {/* Zone 3: Install App Primary Action (visible on mobile & desktop) */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Zone 3: Install App & Admin Access Action */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {isRootAdmin && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('access')}
+              aria-label="Gestion des accès collègues"
+              className={`md:hidden min-h-[38px] px-2.5 rounded-xl border text-xs font-bold inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer ${
+                activeTab === 'access'
+                  ? 'bg-slate-950 border-slate-950 text-white'
+                  : pendingAccessCount > 0
+                  ? 'bg-amber-500 border-amber-600 text-slate-950'
+                  : 'bg-white border-slate-300 text-slate-900'
+              }`}
+            >
+              <ShieldCheck className="w-4 h-4 shrink-0" />
+              <span>Accès{pendingAccessCount > 0 ? ` (${pendingAccessCount})` : ''}</span>
+            </button>
+          )}
           <PWAInstallButton />
           <button
             type="button"
@@ -483,8 +633,8 @@ export function App() {
         </div>
       )}
 
-      {/* Chantier Tabs Bar — always visible except during Camera capture; only this bar scrolls horizontally */}
-      {activeTab !== 'camera' && (
+      {/* Chantier Tabs Bar — always visible except during Camera capture or Admin Access view */}
+      {activeTab !== 'camera' && activeTab !== 'access' && (
         <div className="w-full max-w-full overflow-hidden bg-white border-b border-slate-200">
           <div className="mx-auto w-full max-w-6xl px-3 sm:px-6 py-2 flex items-center gap-2 overflow-x-auto no-scrollbar touch-pan-x">
             {activeTab === 'queue' && rootChantiers.length > 0 && (
@@ -656,11 +806,30 @@ export function App() {
               onFeedback={showToast}
             />
           )}
+
+          {activeTab === 'access' && isRootAdmin && authUser && (
+            <AdminAccessPanel
+              currentEmail={authUser.email || ''}
+              onSignOut={handleSignOut}
+              onFeedback={showToast}
+            />
+          )}
         </div>
 
-        {/* Quiet Signature Footer */}
-        <footer className="mx-auto w-full max-w-6xl px-4 sm:px-6 pt-2 pb-20 md:pb-6 text-center md:text-right text-xs text-slate-500">
-          ChantierShot · F.Pirquin
+        {/* Quiet Signature Footer with Account Sign-Out */}
+        <footer className="mx-auto w-full max-w-6xl px-4 sm:px-6 pt-2 pb-20 md:pb-6 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+          <div className="inline-flex items-center gap-2 min-w-0">
+            <span className="truncate">{authUser?.email}</span>
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="inline-flex items-center gap-1 text-slate-700 hover:text-slate-950 underline cursor-pointer shrink-0"
+            >
+              <LogOut className="w-3 h-3" />
+              <span>Déconnexion</span>
+            </button>
+          </div>
+          <span>ChantierShot · F.Pirquin</span>
         </footer>
       </main>
 

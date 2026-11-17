@@ -1,0 +1,97 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Sole administrator authorized to approve or revoke colleague access
+    function isAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'pirquinfabien@gmail.com';
+    }
+
+    function isValidAccessUser(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'status', 'deviceHint', 'note', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid == userId && isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role in ['admin', 'user'] &&
+        data.status in ['pending', 'approved', 'revoked'] &&
+        (!('deviceHint' in data) || (data.deviceHint is string && data.deviceHint.size() <= 120)) &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 200)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    match /access_users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidAccessUser(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          (isAdmin() && (
+            (isOwner(userId) && incoming().role == 'admin' && incoming().status == 'approved') ||
+            !isOwner(userId)
+          )) ||
+          (
+            isOwner(userId) &&
+            incoming().email == request.auth.token.email &&
+            incoming().role == 'user' &&
+            incoming().status == 'pending' &&
+            !('note' in incoming())
+          )
+        );
+
+      allow update: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidAccessUser(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (
+            isAdmin() &&
+            incoming().email == existing().email &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'role', 'note', 'displayName', 'deviceHint', 'updatedAt'])
+          ) ||
+          (
+            isOwner(userId) &&
+            incoming().email == existing().email &&
+            incoming().role == existing().role &&
+            incoming().status == existing().status &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'deviceHint', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+  }
+}

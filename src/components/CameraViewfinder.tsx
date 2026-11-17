@@ -7,6 +7,8 @@ import {
   Grid3X3,
   ImagePlus,
   Loader2,
+  Maximize2,
+  Minimize2,
   RefreshCw,
   Stamp,
   SwitchCamera,
@@ -50,6 +52,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   onOpenTransfer,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const viewfinderRef = useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const nativeCameraInputRef = useRef<HTMLInputElement | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
@@ -60,6 +63,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   );
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [showGrid, setShowGrid] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [flashActive, setFlashActive] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [importingProgress, setImportingProgress] = useState<{
@@ -72,6 +76,68 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
     null
   );
   const [zoomValue, setZoomValue] = useState(1);
+  const [rearLenses, setRearLenses] = useState<{ deviceId: string; label: string }[]>([]);
+  const [selectedRearDeviceId, setSelectedRearDeviceId] = useState<string | null>(null);
+  const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
+
+  const enterFullscreen = useCallback(async () => {
+    setIsFullscreen(true);
+    const el = viewfinderRef.current;
+    if (el && typeof el.requestFullscreen === 'function' && !document.fullscreenElement) {
+      try {
+        await el.requestFullscreen();
+      } catch {
+        // iOS Safari & embedded iframes rely on CSS fixed inset-0 fullscreen
+      }
+    }
+  }, []);
+
+  const exitFullscreen = useCallback(async () => {
+    setIsFullscreen(false);
+    if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
+      try {
+        await document.exitFullscreen();
+      } catch {
+        // Ignore if not currently in native fullscreen
+      }
+    }
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (isFullscreen) {
+      void exitFullscreen();
+    } else {
+      void enterFullscreen();
+    }
+  }, [isFullscreen, enterFullscreen, exitFullscreen]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullscreen) {
+        void exitFullscreen();
+      }
+    };
+    const handleNativeFullscreenChange = () => {
+      // If user exited native fullscreen via hardware Back / Esc, sync overlay state if needed
+      if (!document.fullscreenElement && isFullscreen) {
+        setIsFullscreen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('fullscreenchange', handleNativeFullscreenChange);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('fullscreenchange', handleNativeFullscreenChange);
+    };
+  }, [isFullscreen, exitFullscreen]);
+
+  useEffect(() => {
+    return () => {
+      if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
+        document.exitFullscreen().catch(() => {});
+      }
+    };
+  }, []);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -82,7 +148,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   }, []);
 
   const startCamera = useCallback(
-    async (mode: 'environment' | 'user') => {
+    async (mode: 'environment' | 'user', deviceIdOverride?: string | null) => {
       stopCamera();
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setCameraState('unavailable');
@@ -96,31 +162,98 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       setCameraError(null);
 
       try {
+        const videoConstraints: MediaTrackConstraints =
+          mode === 'environment' && deviceIdOverride
+            ? {
+                deviceId: { exact: deviceIdOverride },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+              }
+            : {
+                facingMode: { ideal: mode },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+              };
+
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: mode },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
+          video: videoConstraints,
           audio: false,
         });
 
         streamRef.current = stream;
 
-        // Check hardware zoom support on smartphone lens
         const track = stream.getVideoTracks()[0];
+        const trackSettings = track?.getSettings?.();
+        if (trackSettings?.deviceId) {
+          setActiveDeviceId(trackSettings.deviceId);
+        }
+
+        // Check hardware zoom support on smartphone lens (including 0.5x / 0.6x ultra-wide)
         if (track && typeof track.getCapabilities === 'function') {
           const caps = track.getCapabilities() as MediaTrackCapabilities & {
             zoom?: { min: number; max: number; step: number };
           };
           if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+            const minZ = caps.zoom.min;
+            const maxZ = Math.min(caps.zoom.max, 6);
             setZoomRange({
-              min: caps.zoom.min,
-              max: Math.min(caps.zoom.max, 6),
+              min: minZ,
+              max: maxZ,
               step: caps.zoom.step || 0.1,
             });
-            setZoomValue(caps.zoom.min);
+            const initialZoom = minZ < 1 && maxZ >= 1 ? 1 : minZ;
+            setZoomValue(initialZoom);
+            if (initialZoom !== minZ) {
+              track
+                .applyConstraints({
+                  advanced: [{ zoom: initialZoom } as MediaTrackConstraintSet],
+                })
+                .catch(() => {});
+            }
           }
+        }
+
+        // Discover multiple physical rear cameras (e.g. 0.5x/0.6x ultra-wide lens on Android)
+        if (mode === 'environment' && navigator.mediaDevices.enumerateDevices) {
+          try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoInputs = devices.filter((d) => d.kind === 'videoinput');
+            const backCameras = videoInputs.filter((d) => {
+              const lbl = (d.label || '').toLowerCase();
+              return (
+                !lbl.includes('front') &&
+                !lbl.includes('facetime') &&
+                !lbl.includes('user') &&
+                !lbl.includes('avant')
+              );
+            });
+            if (backCameras.length > 1) {
+              setRearLenses(
+                backCameras.map((d, idx) => {
+                  const lbl = (d.label || '').toLowerCase();
+                  let shortLabel = `Obj. ${idx + 1}`;
+                  if (lbl.includes('0.5') || lbl.includes('ultra')) {
+                    shortLabel = '0.5x';
+                  } else if (lbl.includes('0.6')) {
+                    shortLabel = '0.6x';
+                  } else if (lbl.includes('wide') && !lbl.includes('ultra')) {
+                    shortLabel = 'Grand-angle';
+                  } else if (lbl.includes('tele')) {
+                    shortLabel = 'Télé';
+                  } else if (idx === 0) {
+                    shortLabel = '1x';
+                  }
+                  return { deviceId: d.deviceId, label: shortLabel };
+                })
+              );
+            } else {
+              setRearLenses([]);
+            }
+          } catch {
+            // Ignore enumerateDevices restriction
+          }
+        } else if (mode === 'user') {
+          setRearLenses([]);
         }
 
         if (videoRef.current) {
@@ -129,6 +262,12 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
         }
         setCameraState('ready');
       } catch (err) {
+        if (deviceIdOverride) {
+          // Retry with default facingMode if specific lens constraint failed
+          setSelectedRearDeviceId(null);
+          void startCamera(mode, null);
+          return;
+        }
         setCameraState('unavailable');
         const msg =
           err instanceof Error && err.name === 'NotAllowedError'
@@ -162,12 +301,12 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
 
   useEffect(() => {
     if (activeTarget) {
-      startCamera(facingMode);
+      void startCamera(facingMode, facingMode === 'environment' ? selectedRearDeviceId : null);
     }
     return () => {
       stopCamera();
     };
-  }, [activeTarget, facingMode, startCamera, stopCamera]);
+  }, [activeTarget, facingMode, selectedRearDeviceId, startCamera, stopCamera]);
 
   useEffect(() => {
     if (recentSessionPhotos.length === 0) {
@@ -335,7 +474,14 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-5 items-start">
         {/* Viewfinder & Shutter Column */}
         <div className="lg:col-span-8 space-y-2.5 sm:space-y-3 min-w-0">
-          <div className="relative rounded-2xl sm:rounded-3xl overflow-hidden bg-slate-950 aspect-square max-h-[52dvh] sm:max-h-none sm:aspect-[4/3] lg:aspect-[16/10] w-full border border-slate-800">
+          <div
+            ref={viewfinderRef}
+            className={
+              isFullscreen
+                ? 'fixed inset-0 z-50 bg-slate-950 w-full h-[100dvh] overflow-hidden'
+                : 'relative rounded-2xl sm:rounded-3xl overflow-hidden bg-slate-950 aspect-square max-h-[52dvh] sm:max-h-none sm:aspect-[4/3] lg:aspect-[16/10] w-full border border-slate-800'
+            }
+          >
             <video
               ref={videoRef}
               playsInline
@@ -367,11 +513,25 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
             )}
 
             {/* Top Viewfinder Quick Toggles */}
-            <div className="absolute top-3 left-3 right-3 flex items-center justify-between gap-2">
-              <div className="px-3 py-1.5 rounded-xl bg-slate-950/65 backdrop-blur-md text-xs font-medium text-white tabular-nums">
-                Série : {sessionCount} photo{sessionCount > 1 ? 's' : ''}
+            <div
+              className={`absolute top-0 inset-x-0 flex items-start justify-between gap-2 ${
+                isFullscreen
+                  ? 'bg-gradient-to-b from-slate-950/85 via-slate-950/45 to-transparent pt-3.5 pb-6 px-3.5 sm:px-5'
+                  : 'p-3'
+              }`}
+            >
+              <div className="min-w-0 flex flex-col gap-1">
+                {isFullscreen && (
+                  <div className="px-2.5 py-1 rounded-lg bg-slate-950/70 backdrop-blur-md text-xs font-semibold text-amber-400 truncate max-w-[55vw]">
+                    {fullPath}
+                  </div>
+                )}
+                <div className="self-start px-3 py-1.5 rounded-xl bg-slate-950/65 backdrop-blur-md text-xs font-medium text-white tabular-nums">
+                  Série : {sessionCount} photo{sessionCount > 1 ? 's' : ''}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
+
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => setShowGrid((v) => !v)}
@@ -386,34 +546,115 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() =>
-                    setFacingMode((m) => (m === 'environment' ? 'user' : 'environment'))
-                  }
+                  onClick={() => {
+                    setSelectedRearDeviceId(null);
+                    setFacingMode((m) => (m === 'environment' ? 'user' : 'environment'));
+                  }}
                   aria-label="Changer de caméra"
                   className="min-h-[40px] min-w-[40px] rounded-xl bg-slate-950/65 backdrop-blur-md text-white hover:bg-slate-900 flex items-center justify-center cursor-pointer"
                 >
                   <SwitchCamera className="w-4 h-4" />
                 </button>
+                <button
+                  type="button"
+                  onClick={toggleFullscreen}
+                  aria-label={isFullscreen ? 'Quitter le plein écran' : 'Mode plein écran'}
+                  className={`min-h-[40px] px-2.5 sm:px-3 rounded-xl backdrop-blur-md text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    isFullscreen
+                      ? 'bg-white/20 border border-white/30 text-white hover:bg-white/30'
+                      : 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                  }`}
+                >
+                  {isFullscreen ? (
+                    <>
+                      <Minimize2 className="w-4 h-4 shrink-0" />
+                      <span>Quitter</span>
+                    </>
+                  ) : (
+                    <>
+                      <Maximize2 className="w-4 h-4 shrink-0" />
+                      <span>Plein écran</span>
+                    </>
+                  )}
+                </button>
               </div>
             </div>
 
-            {/* Hardware Zoom Bar (shown on supported smartphone cameras) */}
-            {zoomRange && cameraState === 'ready' && (
-              <div className="absolute bottom-24 left-1/2 -translate-x-1/2 flex items-center gap-2.5 px-3 py-1.5 rounded-xl bg-slate-950/65 backdrop-blur-md text-white">
-                <ZoomIn className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <input
-                  type="range"
-                  min={zoomRange.min}
-                  max={zoomRange.max}
-                  step={zoomRange.step}
-                  value={zoomValue}
-                  onChange={(e) => handleZoomChange(Number(e.target.value))}
-                  aria-label="Zoom caméra"
-                  className="w-28 accent-amber-500"
-                />
-                <span className="text-xs font-mono tabular-nums w-8 text-right">
-                  {zoomValue.toFixed(1)}x
-                </span>
+            {/* Hardware Zoom Presets (0.5x / 0.6x / 1x / 2x) & Physical Rear Lenses */}
+            {cameraState === 'ready' && (zoomRange || rearLenses.length > 1) && (
+              <div
+                className={`absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 max-w-[92%] ${
+                  isFullscreen ? 'bottom-28' : 'bottom-24'
+                }`}
+              >
+                {rearLenses.length > 1 && (
+                  <div className="flex items-center gap-1 px-1.5 py-1 rounded-xl bg-slate-950/75 backdrop-blur-md border border-white/15">
+                    {rearLenses.map((lens) => {
+                      const isCurrent =
+                        selectedRearDeviceId === lens.deviceId ||
+                        (!selectedRearDeviceId && activeDeviceId === lens.deviceId);
+                      return (
+                        <button
+                          key={lens.deviceId}
+                          type="button"
+                          onClick={() => setSelectedRearDeviceId(lens.deviceId)}
+                          className={`min-h-[30px] px-2.5 rounded-lg text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                            isCurrent
+                              ? 'bg-amber-500 text-slate-950'
+                              : 'text-white hover:bg-white/15'
+                          }`}
+                        >
+                          {lens.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {zoomRange && (
+                  <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-slate-950/75 backdrop-blur-md text-white">
+                    {zoomRange.min < 1 && (
+                      <button
+                        type="button"
+                        onClick={() => handleZoomChange(zoomRange.min)}
+                        className={`min-h-[28px] px-2 rounded-lg text-[11px] font-bold tabular-nums cursor-pointer ${
+                          Math.abs(zoomValue - zoomRange.min) < 0.08
+                            ? 'bg-amber-500 text-slate-950'
+                            : 'bg-white/10 text-white hover:bg-white/20'
+                        }`}
+                      >
+                        {zoomRange.min.toFixed(1)}x
+                      </button>
+                    )}
+                    {zoomRange.min < 1 && zoomRange.max >= 1 && (
+                      <button
+                        type="button"
+                        onClick={() => handleZoomChange(1)}
+                        className={`min-h-[28px] px-2 rounded-lg text-[11px] font-bold tabular-nums cursor-pointer ${
+                          Math.abs(zoomValue - 1) < 0.15
+                            ? 'bg-amber-500 text-slate-950'
+                            : 'bg-white/10 text-white hover:bg-white/20'
+                        }`}
+                      >
+                        1x
+                      </button>
+                    )}
+                    <ZoomIn className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <input
+                      type="range"
+                      min={zoomRange.min}
+                      max={zoomRange.max}
+                      step={zoomRange.step}
+                      value={zoomValue}
+                      onChange={(e) => handleZoomChange(Number(e.target.value))}
+                      aria-label="Zoom caméra"
+                      className="w-24 sm:w-28 accent-amber-500"
+                    />
+                    <span className="text-xs font-mono tabular-nums w-9 text-right">
+                      {zoomValue.toFixed(1)}x
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -469,11 +710,18 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
             )}
 
             {/* Bottom Shutter Bar inside Viewfinder (Thumb-Zone) */}
-            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950/90 via-slate-950/55 to-transparent pt-6 pb-3 sm:pt-8 sm:pb-4 px-3.5 sm:px-5 flex items-center justify-between gap-3">
+            <div
+              className={`absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950/90 via-slate-950/55 to-transparent pt-6 sm:pt-8 px-3.5 sm:px-5 flex items-center justify-between gap-3 ${
+                isFullscreen ? 'pb-6 pb-safe' : 'pb-3 sm:pb-4'
+              }`}
+            >
               {/* Left: Last Capture Thumbnail / Transfer shortcut */}
               <button
                 type="button"
-                onClick={onOpenTransfer}
+                onClick={() => {
+                  void exitFullscreen();
+                  onOpenTransfer();
+                }}
                 className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl overflow-hidden border-2 border-white/30 bg-slate-900 flex items-center justify-center shrink-0 cursor-pointer"
                 aria-label="Voir les photos capturées"
               >
@@ -498,9 +746,19 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
                 }
                 disabled={capturing || Boolean(importingProgress)}
                 aria-label="Prendre une photo"
-                className="w-[66px] h-[66px] sm:w-[72px] sm:h-[72px] rounded-full border-4 border-white bg-amber-500 hover:bg-amber-400 active:scale-95 transition-transform flex items-center justify-center shadow-lg cursor-pointer disabled:opacity-60"
+                className={`${
+                  isFullscreen
+                    ? 'w-[76px] h-[76px]'
+                    : 'w-[66px] h-[66px] sm:w-[72px] sm:h-[72px]'
+                } rounded-full border-4 border-white bg-amber-500 hover:bg-amber-400 active:scale-95 transition-transform flex items-center justify-center shadow-lg cursor-pointer disabled:opacity-60`}
               >
-                <span className="w-[50px] h-[50px] sm:w-[56px] sm:h-[56px] rounded-full border-2 border-slate-950/20" />
+                <span
+                  className={`${
+                    isFullscreen
+                      ? 'w-[60px] h-[60px]'
+                      : 'w-[50px] h-[50px] sm:w-[56px] sm:h-[56px]'
+                  } rounded-full border-2 border-slate-950/20`}
+                />
               </button>
 
               {/* Right: Phone Gallery Multi-Import Button */}

@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "AccessUser": {
+      "title": "AccessUser",
+      "description": "Compte utilisateur et statut d'autorisation d'accès à ChantierShot",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Identifiant Firebase Auth de l'utilisateur",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Adresse e-mail Google vérifiée",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Nom complet affiché dans le panneau d'accès",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "user"],
+          "description": "Rôle attribué (seul l'administrateur possède admin)"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "revoked"],
+          "description": "Statut de l'autorisation d'accès contrôlé uniquement par l'administrateur"
+        },
+        "deviceHint": {
+          "type": "string",
+          "description": "Indication du type d'appareil ayant demandé l'accès",
+          "maxLength": 120
+        },
+        "note": {
+          "type": "string",
+          "description": "Note interne de l'administrateur sur ce collègue",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Horodatage serveur de création du compte"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Horodatage serveur de dernière mise à jour"
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "displayName",
+        "role",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/access_users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/AccessUser"
+      },
+      "description": "Profils d'accès des utilisateurs et demandes d'autorisation approuvées ou révoquées uniquement par l'administrateur"
+    }
+  }
+}
