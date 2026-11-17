@@ -68,9 +68,10 @@ service cloud.firestore {
 
     function isValidPreauthorizedEmail(data, emailId) {
       return data.keys().hasAll(['id', 'email', 'createdBy', 'createdAt']) &&
-        data.keys().hasOnly(['id', 'email', 'note', 'createdBy', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'email', 'accessCode', 'note', 'createdBy', 'createdAt']) &&
         data.id is string && data.id == emailId && isValidId(data.id) &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        (!('accessCode' in data) || (data.accessCode is string && data.accessCode.size() >= 3 && data.accessCode.size() <= 32)) &&
         (!('note' in data) || (data.note is string && data.note.size() <= 200)) &&
         data.createdBy is string && data.createdBy == request.auth.uid && isValidId(data.createdBy) &&
         data.createdAt is timestamp;
@@ -115,8 +116,19 @@ service cloud.firestore {
             isOwner(userId) &&
             incoming().email == existing().email &&
             incoming().role == existing().role &&
-            incoming().status == existing().status &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'deviceHint', 'updatedAt'])
+            (
+              (
+                incoming().status == existing().status &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'deviceHint', 'updatedAt'])
+              ) ||
+              (
+                existing().status == 'pending' &&
+                incoming().role == 'user' &&
+                incoming().status == 'approved' &&
+                isPreauthorizedCaller() &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'displayName', 'deviceHint', 'updatedAt'])
+              )
+            )
           )
         );
 
@@ -143,7 +155,7 @@ service cloud.firestore {
         incoming().email == existing().email &&
         incoming().createdBy == existing().createdBy &&
         incoming().createdAt == existing().createdAt &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['note']);
+        incoming().diff(existing()).affectedKeys().hasOnly(['note', 'accessCode']);
       allow delete: if isAdmin() && isValidId(emailId);
     }
   }

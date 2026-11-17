@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { User, signInWithPopup, signOut } from 'firebase/auth';
 import {
   Clock,
+  KeyRound,
   Loader2,
   LogIn,
   LogOut,
@@ -12,10 +13,12 @@ import {
 import { auth, googleProvider } from '../lib/firebase';
 import {
   AccessUserRecord,
+  checkOwnAccessRecord,
   clearCachedApproval,
   extractFirestoreErrorReason,
-  fetchOrCreateOwnAccessRecord,
   isOfflineFirestoreError,
+  submitPendingAccessRequest,
+  verifyPersonalCodeAndActivate,
 } from '../lib/accessControl';
 
 interface AccessGateProps {
@@ -37,11 +40,16 @@ export const AccessGate: React.FC<AccessGateProps> = ({
 }) => {
   const [signingIn, setSigningIn] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [verifyingCode, setVerifyingCode] = useState(false);
+  const [requestingAccess, setRequestingAccess] = useState(false);
+  const [personalCode, setPersonalCode] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
   const handleGoogleSignIn = async () => {
     setSigningIn(true);
     setAuthError(null);
+    setInfoMessage(null);
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
@@ -70,6 +78,9 @@ export const AccessGate: React.FC<AccessGateProps> = ({
 
   const handleSwitchAccount = async () => {
     clearCachedApproval();
+    setPersonalCode('');
+    setAuthError(null);
+    setInfoMessage(null);
     await signOut(auth);
   };
 
@@ -77,19 +88,58 @@ export const AccessGate: React.FC<AccessGateProps> = ({
     if (!user) return;
     setRefreshing(true);
     setAuthError(null);
+    setInfoMessage(null);
     try {
-      const rec = await fetchOrCreateOwnAccessRecord(user);
+      const rec = await checkOwnAccessRecord(user);
       onManualAccessRefresh(rec);
     } catch (err) {
       if (isOfflineFirestoreError(err)) {
         setAuthError('Aucune connexion internet pour vérifier l’autorisation.');
       } else {
-        setAuthError(
-          `Impossible d’enregistrer ou vérifier votre demande (${extractFirestoreErrorReason(err)}).`
-        );
+        setAuthError(extractFirestoreErrorReason(err));
       }
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const handleVerifyCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !personalCode.trim()) return;
+    setVerifyingCode(true);
+    setAuthError(null);
+    setInfoMessage(null);
+    try {
+      const approved = await verifyPersonalCodeAndActivate(user, personalCode);
+      onManualAccessRefresh(approved);
+    } catch (err) {
+      if (isOfflineFirestoreError(err)) {
+        setAuthError('Connexion internet requise pour valider votre code personnel.');
+      } else {
+        setAuthError(extractFirestoreErrorReason(err));
+      }
+    } finally {
+      setVerifyingCode(false);
+    }
+  };
+
+  const handleRequestAccessWithoutCode = async () => {
+    if (!user) return;
+    setRequestingAccess(true);
+    setAuthError(null);
+    setInfoMessage(null);
+    try {
+      const rec = await submitPendingAccessRequest(user);
+      onManualAccessRefresh(rec);
+      setInfoMessage('Demande envoyée à Fabien Pirquin.');
+    } catch (err) {
+      if (isOfflineFirestoreError(err)) {
+        setAuthError('Connexion internet requise pour envoyer la demande.');
+      } else {
+        setAuthError(extractFirestoreErrorReason(err));
+      }
+    } finally {
+      setRequestingAccess(false);
     }
   };
 
@@ -139,8 +189,8 @@ export const AccessGate: React.FC<AccessGateProps> = ({
                 <span>Connexion unique par appareil</span>
               </div>
               <p className="text-xs leading-relaxed text-slate-700">
-                Connectez-vous <strong>une seule fois</strong> sur ce téléphone ou PC. Votre session reste mémorisée à chaque ouverture. Tout nouvel utilisateur doit être autorisé par{' '}
-                <strong>Fabien Pirquin</strong> avant d’accéder à l’application.
+                Connectez-vous <strong>une seule fois</strong> avec votre adresse Google, puis saisissez le code personnel fourni par{' '}
+                <strong>Fabien Pirquin</strong>. Votre session reste ensuite mémorisée sur cet appareil.
               </p>
             </div>
 
@@ -166,7 +216,7 @@ export const AccessGate: React.FC<AccessGateProps> = ({
           </div>
         )}
 
-        {/* Signed In -> Error / Offline Blocked (never approved offline) */}
+        {/* Signed In -> Error / Offline Blocked */}
         {user && offlineBlockedMessage && (
           <div className="space-y-4">
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 space-y-2 text-xs text-slate-900">
@@ -208,51 +258,102 @@ export const AccessGate: React.FC<AccessGateProps> = ({
           </div>
         )}
 
-        {/* Signed In -> Pending Admin Approval */}
+        {/* Signed In -> Enter Personal Access Code (or Pending Status) */}
         {user && !offlineBlockedMessage && (!accessRecord || accessRecord.status === 'pending') && (
           <div className="space-y-4">
-            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 space-y-2">
-              <div className="flex items-center gap-2 text-sm font-bold text-slate-950">
-                <Clock className="w-5 h-5 text-amber-600 shrink-0" />
-                <span>En attente d’autorisation</span>
-              </div>
-              <p className="text-xs leading-relaxed text-slate-800">
-                Votre demande a bien été enregistrée pour{' '}
-                <strong>{user.email}</strong>. Demandez à{' '}
-                <strong>Fabien Pirquin</strong> d’activer votre accès depuis son application.
-              </p>
-              <p className="text-[11px] text-slate-700">
-                Dès que l’accès est validé, cet écran se débloque automatiquement sans avoir à vous reconnecter.
-              </p>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-800">
+              Compte connecté : <strong className="text-slate-950">{user.email}</strong>
             </div>
 
+            <form onSubmit={handleVerifyCode} className="space-y-3">
+              <label className="block space-y-1.5">
+                <span className="flex items-center gap-1.5 text-xs font-bold text-slate-950">
+                  <KeyRound className="w-4 h-4 text-amber-600" />
+                  <span>Code personnel d’accès</span>
+                </span>
+                <input
+                  type="text"
+                  required
+                  value={personalCode}
+                  onChange={(e) => setPersonalCode(e.target.value)}
+                  placeholder="Saisissez le code donné par Fabien Pirquin"
+                  autoComplete="one-time-code"
+                  className="w-full min-h-[48px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-mono tracking-wider text-slate-950 placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+              </label>
+
+              <button
+                type="submit"
+                disabled={verifyingCode || !personalCode.trim()}
+                className="w-full min-h-[48px] px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-sm font-bold inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {verifyingCode ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <KeyRound className="w-4 h-4" />
+                )}
+                <span>{verifyingCode ? 'Vérification...' : 'Valider mon code d’accès'}</span>
+              </button>
+            </form>
+
+            {accessRecord?.status === 'pending' && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-3.5 space-y-1.5 text-xs text-slate-900">
+                <div className="flex items-center gap-1.5 font-bold">
+                  <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Demande déjà enregistrée</span>
+                </div>
+                <p className="text-[11px] text-slate-700">
+                  Vous pouvez soit saisir votre code personnel ci-dessus, soit attendre que Fabien Pirquin valide votre accès puis cliquer sur Actualiser.
+                </p>
+              </div>
+            )}
+
+            {infoMessage && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs text-emerald-900">
+                {infoMessage}
+              </div>
+            )}
+
             {authError && (
-              <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs text-red-900">
+              <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs text-red-900 break-words">
                 {authError}
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                disabled={refreshing}
-                onClick={handleCheckStatus}
-                className="min-h-[46px] px-3 rounded-xl bg-slate-950 text-white text-xs font-semibold hover:bg-slate-800 inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
-              >
-                {refreshing ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="w-4 h-4" />
-                )}
-                <span>Actualiser</span>
-              </button>
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100">
+              {accessRecord?.status === 'pending' ? (
+                <button
+                  type="button"
+                  disabled={refreshing}
+                  onClick={handleCheckStatus}
+                  className="min-h-[40px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                >
+                  {refreshing ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  )}
+                  <span>Actualiser</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={requestingAccess}
+                  onClick={handleRequestAccessWithoutCode}
+                  className="text-xs font-medium text-slate-600 hover:text-slate-950 underline cursor-pointer disabled:opacity-50"
+                >
+                  {requestingAccess
+                    ? 'Envoi de la demande...'
+                    : 'Pas encore de code ? Demander l’accès'}
+                </button>
+              )}
 
               <button
                 type="button"
                 onClick={handleSwitchAccount}
-                className="min-h-[46px] px-3 rounded-xl border border-slate-300 bg-white text-slate-800 text-xs font-semibold hover:bg-slate-50 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                className="min-h-[40px] px-3 rounded-xl border border-slate-300 bg-white text-slate-800 text-xs font-semibold hover:bg-slate-50 inline-flex items-center gap-1.5 cursor-pointer"
               >
-                <LogOut className="w-4 h-4" />
+                <LogOut className="w-3.5 h-3.5" />
                 <span>Autre compte</span>
               </button>
             </div>
@@ -268,7 +369,7 @@ export const AccessGate: React.FC<AccessGateProps> = ({
                 <span>Accès non autorisé</span>
               </div>
               <p className="text-xs leading-relaxed text-red-900">
-                L’accès pour <strong>{user.email}</strong> a été suspendu ou refusé par l’administrateur (Fabien Pirquin).
+                L’accès pour <strong>{user.email}</strong> a été suspendu ou supprimé par l’administrateur (Fabien Pirquin).
               </p>
             </div>
 

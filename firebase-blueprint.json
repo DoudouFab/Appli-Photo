@@ -85,6 +85,12 @@
           "minLength": 3,
           "maxLength": 254
         },
+        "accessCode": {
+          "type": "string",
+          "description": "Code d'accès personnel attribué à cette adresse e-mail par l'administrateur",
+          "minLength": 3,
+          "maxLength": 32
+        },
         "note": {
           "type": "string",
           "description": "Libellé ou équipe du collègue pré-autorisé",

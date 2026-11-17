@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import {
   Camera,
@@ -40,15 +40,12 @@ import {
 import { auth } from './lib/firebase';
 import {
   AccessUserRecord,
+  checkOwnAccessRecord,
   clearCachedApproval,
-  detectDeviceHint,
   extractFirestoreErrorReason,
   isAdminEmail,
   isOfflineFirestoreError,
   loadCachedApproval,
-  refreshOwnDeviceMetadata,
-  subscribeToAllAccessUsers,
-  subscribeToOwnAccessRecord,
 } from './lib/accessControl';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { useStorageQuota } from './hooks/useStorageQuota';
@@ -70,8 +67,6 @@ export function App() {
   const [accessRecord, setAccessRecord] = useState<AccessUserRecord | null>(null);
   const [checkingAccess, setCheckingAccess] = useState(false);
   const [offlineBlockedMessage, setOfflineBlockedMessage] = useState<string | null>(null);
-  const [pendingAccessCount, setPendingAccessCount] = useState(0);
-  const refreshedMetadataUidRef = useRef<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [activeTarget, setActiveTarget] = useState<TargetFolder | null>(() =>
@@ -189,85 +184,63 @@ export function App() {
         setAccessRecord(null);
         setCheckingAccess(false);
         setOfflineBlockedMessage(null);
-        setPendingAccessCount(0);
       }
     });
     return () => unsub();
   }, []);
 
-  // Live Firestore authorization listener for signed-in user
+  // One-shot Firestore authorization check at startup for non-admin users (zero background listeners)
   useEffect(() => {
-    if (!authUser) {
-      refreshedMetadataUidRef.current = null;
+    if (!authUser) return;
+
+    if (isAdminEmail(authUser.email, authUser.emailVerified)) {
+      setCheckingAccess(false);
+      setOfflineBlockedMessage(null);
       return;
     }
+
+    const cached = loadCachedApproval(authUser.uid);
+    if (!navigator.onLine) {
+      setCheckingAccess(false);
+      if (cached?.status === 'approved') {
+        setOfflineBlockedMessage(null);
+      } else {
+        setOfflineBlockedMessage(
+          'Connectez-vous à internet pour valider votre code d’accès la 1re fois.'
+        );
+      }
+      return;
+    }
+
+    let cancelled = false;
     setCheckingAccess(true);
     setOfflineBlockedMessage(null);
 
-    const unsub = subscribeToOwnAccessRecord(
-      authUser,
-      (record) => {
+    void checkOwnAccessRecord(authUser)
+      .then((record) => {
+        if (cancelled) return;
         setAccessRecord(record);
         setCheckingAccess(false);
         setOfflineBlockedMessage(null);
-        if (
-          record &&
-          navigator.onLine &&
-          refreshedMetadataUidRef.current !== authUser.uid
-        ) {
-          refreshedMetadataUidRef.current = authUser.uid;
-          const expectedName = (
-            authUser.displayName ||
-            authUser.email?.split('@')[0] ||
-            'Utilisateur'
-          )
-            .trim()
-            .slice(0, 120);
-          const expectedDevice = detectDeviceHint().slice(0, 120);
-          if (
-            record.displayName !== expectedName ||
-            record.deviceHint !== expectedDevice
-          ) {
-            void refreshOwnDeviceMetadata(authUser);
-          }
-        }
-      },
-      (err) => {
+      })
+      .catch((err) => {
+        if (cancelled) return;
         setCheckingAccess(false);
-        const cached = loadCachedApproval(authUser.uid);
-        if (isAdminEmail(authUser.email, authUser.emailVerified) || cached?.status === 'approved') {
+        if (cached?.status === 'approved') {
           setOfflineBlockedMessage(null);
         } else if (isOfflineFirestoreError(err)) {
           setOfflineBlockedMessage(
-            'Connectez-vous à internet pour vérifier votre autorisation initiale auprès de l’administrateur.'
+            'Connectez-vous à internet pour vérifier votre autorisation auprès de l’administrateur.'
           );
         } else {
-          setOfflineBlockedMessage(
-            `Impossible d’enregistrer votre demande (${extractFirestoreErrorReason(err)}). Appuyez sur Réessayer.`
-          );
+          setOfflineBlockedMessage(extractFirestoreErrorReason(err));
         }
-      }
-    );
+      });
 
-    return () => unsub();
+    return () => {
+      cancelled = true;
+    };
   }, [authUser]);
-
-  // Live pending requests counter for sole Admin (pirquinfabien@gmail.com)
-  useEffect(() => {
-    if (!isRootAdmin) {
-      setPendingAccessCount(0);
-      return;
-    }
-    const unsub = subscribeToAllAccessUsers(
-      (users) => {
-        setPendingAccessCount(
-          users.filter((u) => u.status === 'pending' && u.role !== 'admin').length
-        );
-      },
-      () => {}
-    );
-    return () => unsub();
-  }, [isRootAdmin]);
 
   useEffect(() => {
     if (!isAuthorized) return;
@@ -664,13 +637,13 @@ export function App() {
             <button
               type="button"
               onClick={() => setActiveTab('access')}
-              className={`whitespace-nowrap shrink-0 cursor-pointer transition-colors tabular-nums ${
+              className={`whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                 activeTab === 'access'
                   ? 'text-slate-950 font-semibold underline decoration-amber-500 decoration-2 underline-offset-8'
                   : 'hover:text-slate-950'
               }`}
             >
-              Accès{pendingAccessCount > 0 ? ` (${pendingAccessCount})` : ''}
+              Accès
             </button>
           )}
         </nav>
@@ -685,13 +658,11 @@ export function App() {
               className={`md:hidden min-h-[38px] px-2.5 rounded-xl border text-xs font-bold inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer ${
                 activeTab === 'access'
                   ? 'bg-slate-950 border-slate-950 text-white'
-                  : pendingAccessCount > 0
-                  ? 'bg-amber-500 border-amber-600 text-slate-950'
                   : 'bg-white border-slate-300 text-slate-900'
               }`}
             >
               <ShieldCheck className="w-4 h-4 shrink-0" />
-              <span>Accès{pendingAccessCount > 0 ? ` (${pendingAccessCount})` : ''}</span>
+              <span>Accès</span>
             </button>
           )}
           <PWAInstallButton />
