@@ -45,6 +45,11 @@
           "description": "Note interne de l'administrateur sur ce collègue",
           "maxLength": 200
         },
+        "activationCode": {
+          "type": "string",
+          "description": "Code personnel saisi lors de l'activation du compte",
+          "maxLength": 32
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

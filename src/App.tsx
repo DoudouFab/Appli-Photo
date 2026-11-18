@@ -67,6 +67,7 @@ export function App() {
   const [accessRecord, setAccessRecord] = useState<AccessUserRecord | null>(null);
   const [checkingAccess, setCheckingAccess] = useState(false);
   const [offlineBlockedMessage, setOfflineBlockedMessage] = useState<string | null>(null);
+  const [emailVerifyTick, setEmailVerifyTick] = useState(0);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [activeTarget, setActiveTarget] = useState<TargetFolder | null>(() =>
@@ -161,15 +162,21 @@ export function App() {
     }
   }, []);
 
+  const isEmailVerifiedOrGoogle = Boolean(
+    authUser &&
+      (authUser.emailVerified ||
+        authUser.providerData?.some((p) => p.providerId === 'google.com'))
+  );
   const isRootAdmin = Boolean(
     authUser && isAdminEmail(authUser.email, authUser.emailVerified)
   );
   const cachedApproval = authUser ? loadCachedApproval(authUser.uid) : null;
   const isApprovedOfflineFallback = Boolean(
-    !isOnline && authUser && cachedApproval?.status === 'approved'
+    !isOnline && authUser && isEmailVerifiedOrGoogle && cachedApproval?.status === 'approved'
   );
   const isAuthorized = Boolean(
     authUser &&
+      isEmailVerifiedOrGoogle &&
       (isRootAdmin ||
         accessRecord?.status === 'approved' ||
         isApprovedOfflineFallback)
@@ -194,6 +201,17 @@ export function App() {
     if (!authUser) return;
 
     if (isAdminEmail(authUser.email, authUser.emailVerified)) {
+      setCheckingAccess(false);
+      setOfflineBlockedMessage(null);
+      return;
+    }
+
+    const verifiedOrGoogle = Boolean(
+      authUser.emailVerified ||
+        authUser.providerData?.some((p) => p.providerId === 'google.com')
+    );
+    if (!verifiedOrGoogle) {
+      setAccessRecord(null);
       setCheckingAccess(false);
       setOfflineBlockedMessage(null);
       return;
@@ -240,7 +258,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [authUser]);
+  }, [authUser, emailVerifyTick]);
 
   useEffect(() => {
     if (!isAuthorized) return;
@@ -551,6 +569,7 @@ export function App() {
           setAccessRecord(rec);
           setOfflineBlockedMessage(null);
         }}
+        onEmailVerified={() => setEmailVerifyTick((t) => t + 1)}
       />
     );
   }

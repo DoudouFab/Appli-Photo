@@ -231,8 +231,8 @@ export async function verifyPersonalCodeAndActivate(
   }
 
   const expectedCode = (preauth.accessCode || '').trim();
+  const cleanInput = enteredCode.trim().slice(0, 32);
   if (expectedCode) {
-    const cleanInput = enteredCode.trim();
     if (!cleanInput) {
       throw new Error('Saisissez le code personnel fourni par Fabien Pirquin.');
     }
@@ -258,6 +258,7 @@ export async function verifyPersonalCodeAndActivate(
         role: 'user',
         status: 'approved',
         deviceHint,
+        ...(cleanInput ? { activationCode: cleanInput } : {}),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -277,6 +278,7 @@ export async function verifyPersonalCodeAndActivate(
           status: 'approved',
           displayName: cleanName,
           deviceHint,
+          ...(cleanInput ? { activationCode: cleanInput } : {}),
           updatedAt: serverTimestamp(),
         });
       } catch (err) {

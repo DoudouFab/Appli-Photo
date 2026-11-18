@@ -265,7 +265,7 @@ export const AdminAccessPanel: React.FC<AdminAccessPanelProps> = ({
             Gestion des accès & codes collègues
           </h1>
           <p className="text-xs text-slate-700">
-            Attribuez un e-mail Google et son code personnel à chaque collègue. Mode ultra-économe : aucune écoute en arrière-plan.
+            Attribuez un e-mail (Google ou adresse pro type @insaep.be) et son code personnel à chaque collègue. Mode ultra-économe : aucune écoute en arrière-plan.
           </p>
         </div>
 
@@ -308,14 +308,14 @@ export const AdminAccessPanel: React.FC<AdminAccessPanelProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
             <div className="sm:col-span-5 space-y-1">
               <label className="block text-[11px] font-semibold text-slate-700">
-                Adresse e-mail Google du collègue
+                Adresse e-mail du collègue (Google ou pro)
               </label>
               <input
                 type="email"
                 required
                 value={newEmail}
                 onChange={(e) => setNewEmail(e.target.value)}
-                placeholder="collegue@gmail.com"
+                placeholder="collegue@insaep.be"
                 className="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm text-slate-950 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
               />
             </div>
@@ -364,7 +364,7 @@ export const AdminAccessPanel: React.FC<AdminAccessPanelProps> = ({
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
             <span className="text-[11px] text-slate-600">
-              Le collègue se connectera 1 fois avec cet e-mail Google puis saisira ce code personnel.
+              Le collègue se connectera 1 fois (Google ou e-mail pro) puis saisira ce code personnel.
             </span>
             <button
               type="submit"

@@ -26,6 +26,15 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
 
+    function isVerifiedEmailCaller() {
+      return isSignedIn() && (
+        request.auth.token.email_verified == true ||
+        ('firebase' in request.auth.token &&
+          'sign_in_provider' in request.auth.token.firebase &&
+          request.auth.token.firebase.sign_in_provider == 'google.com')
+      );
+    }
+
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
@@ -43,7 +52,7 @@ service cloud.firestore {
     }
 
     function isPreauthorizedCaller() {
-      return isSignedIn() &&
+      return isVerifiedEmailCaller() &&
         'email' in request.auth.token &&
         request.auth.token.email is string &&
         callerPreauthDocId().size() >= 3 &&
@@ -52,9 +61,20 @@ service cloud.firestore {
         get(/databases/$(database)/documents/preauthorized_emails/$(callerPreauthDocId())).data.email.lower() == request.auth.token.email.lower();
     }
 
+    function hasValidPreauthActivation(data) {
+      return isPreauthorizedCaller() && (
+        !('accessCode' in get(/databases/$(database)/documents/preauthorized_emails/$(callerPreauthDocId())).data) ||
+        ('activationCode' in data &&
+          data.activationCode is string &&
+          data.activationCode.size() >= 3 &&
+          data.activationCode.size() <= 32 &&
+          data.activationCode.lower() == get(/databases/$(database)/documents/preauthorized_emails/$(callerPreauthDocId())).data.accessCode.lower())
+      );
+    }
+
     function isValidAccessUser(data, userId) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'status', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'status', 'deviceHint', 'note', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'status', 'deviceHint', 'note', 'activationCode', 'createdAt', 'updatedAt']) &&
         data.uid is string && data.uid == userId && isValidId(data.uid) &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
@@ -62,6 +82,7 @@ service cloud.firestore {
         data.status in ['pending', 'approved', 'revoked'] &&
         (!('deviceHint' in data) || (data.deviceHint is string && data.deviceHint.size() <= 120)) &&
         (!('note' in data) || (data.note is string && data.note.size() <= 200)) &&
+        (!('activationCode' in data) || (data.activationCode is string && data.activationCode.size() <= 32)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -81,7 +102,7 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin();
 
-      allow create: if isSignedIn() &&
+      allow create: if isVerifiedEmailCaller() &&
         isValidId(userId) &&
         isValidAccessUser(incoming(), userId) &&
         incoming().createdAt == request.time &&
@@ -96,12 +117,12 @@ service cloud.firestore {
             request.auth.token.email is string &&
             incoming().email.lower() == request.auth.token.email.lower() &&
             incoming().role == 'user' &&
-            (incoming().status == 'pending' || (incoming().status == 'approved' && isPreauthorizedCaller())) &&
+            (incoming().status == 'pending' || (incoming().status == 'approved' && hasValidPreauthActivation(incoming()))) &&
             !('note' in incoming())
           )
         );
 
-      allow update: if isSignedIn() &&
+      allow update: if isVerifiedEmailCaller() &&
         isValidId(userId) &&
         isValidAccessUser(incoming(), userId) &&
         incoming().uid == existing().uid &&
@@ -125,8 +146,8 @@ service cloud.firestore {
                 existing().status == 'pending' &&
                 incoming().role == 'user' &&
                 incoming().status == 'approved' &&
-                isPreauthorizedCaller() &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'displayName', 'deviceHint', 'updatedAt'])
+                hasValidPreauthActivation(incoming()) &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activationCode', 'displayName', 'deviceHint', 'updatedAt'])
               )
             )
           )
@@ -137,7 +158,7 @@ service cloud.firestore {
 
     match /preauthorized_emails/{emailId} {
       allow get: if isAdmin() || (
-        isSignedIn() &&
+        isVerifiedEmailCaller() &&
         isValidId(emailId) &&
         'email' in request.auth.token &&
         request.auth.token.email is string &&
